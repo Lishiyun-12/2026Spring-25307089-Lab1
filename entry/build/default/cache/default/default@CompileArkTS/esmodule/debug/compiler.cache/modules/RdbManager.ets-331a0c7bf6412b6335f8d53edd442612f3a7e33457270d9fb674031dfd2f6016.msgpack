@@ -1,0 +1,751 @@
+Ôr@Ÿªassertions¤code´customTransformCache¬dependencies¢id¤meta±moduleSideEffects¬originalCode±originalSourcemap«resolvedIds®sourcemapChainµsyntheticNamedExportsµtransformDependencies®transformFiles¨cacheAstÔrAÚ5Ùimport relationalStore from "@ohos.data.relationalStore";
+import distributedDeviceManager from "@ohos.distributedDeviceManager";
+import hilog from "@ohos.hilog";
+import CommonConstants from '../common/CommonConstants';
+// Relational data management category.
+export class RdbManager {
+    constructor(context) {
+        this.rdbStore = null;
+        this.context = null;
+        this.localDeviceNetworkId = '';
+        this.context = context;
+    }
+    // Set distributed properties for data tables.
+    async setDistributedTables(context) {
+        try {
+            this.rdbStore = await relationalStore.getRdbStore(context, CommonConstants.STORE_CONFIG);
+            await this.rdbStore.executeSql(CommonConstants.ACCOUNT_TABLE.sqlCreate);
+            // Set the created table as a distributed table.
+            await this.rdbStore.setDistributedTables([CommonConstants.ACCOUNT_TABLE.tableName]);
+        }
+        catch (error) {
+            hilog.error(0x0000, 'RdbManager', `have error .Code:${error.code}, message: ${error.message}`);
+        }
+    }
+    // Subscribe to data change messages from other devices within the network.
+    subscribeDataChange() {
+        if (this.rdbStore) {
+            try {
+                // Call the distributed data subscription interface to register observers for the database.
+                // When data changes occur in a distributed database, a callback will be called.
+                this.rdbStore.on('dataChange', relationalStore.SubscribeType.SUBSCRIBE_TYPE_REMOTE, async (devices) => {
+                    hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'dataChange devices ' + devices);
+                    for (let i = 0; i < devices.length; i++) {
+                        let device = devices[i];
+                        if (!this.rdbStore) {
+                            return;
+                        }
+                        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `The data of device:${device} has been changed.`);
+                        const result = await this.remoteQuery(device);
+                        this.context?.eventHub.emit('dataChange', JSON.stringify(result));
+                    }
+                });
+            }
+            catch (err) {
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Failed to register observer. Code:${err.code},message:${err.message}`);
+            }
+        }
+    }
+    // Get local device ID.
+    getLocalDeviceNetworkId() {
+        try {
+            // create deviceManager.
+            const deviceManager = distributedDeviceManager.createDeviceManager('com.example.crossDeviceDataSynchronization');
+            // DeviceIds is obtained by calling the getAvailableDeviceListSync method by the DeviceManager.
+            if (deviceManager != null) {
+                this.localDeviceNetworkId = deviceManager.getLocalDeviceNetworkId();
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'local device networkId: ' + JSON.stringify(this.localDeviceNetworkId));
+            }
+        }
+        catch (err) {
+            hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, `Failed to insert data. Code:${err.code}, message:${err.message}`);
+        }
+    }
+    // Query the list of devices within the network.
+    getDeviceList() {
+        let deviceManager;
+        let deviceIds = [];
+        try {
+            // create deviceManager.
+            deviceManager = distributedDeviceManager.createDeviceManager('com.example.crossDeviceDataSynchronization');
+            // DeviceIds is obtained by calling the getAvailableDeviceListSync method by the DeviceManager.
+            if (deviceManager != null) {
+                let devices = deviceManager.getAvailableDeviceListSync();
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'devices size ' + devices.length);
+                for (let i = 0; i < devices.length; i++) {
+                    deviceIds[i] = devices[i].networkId;
+                    hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'devices size ' + deviceIds[i]);
+                }
+            }
+        }
+        catch (err) {
+            hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, `Failed to insert data. Code:${err.code}, message:${err.message}`);
+        }
+        return deviceIds;
+    }
+    /**
+     * Add new data
+     * @param data add data
+     * @param isSync isSync
+     * @returns
+     */
+    async insertData(data, isSync = true) {
+        const insertData = this.generateBucket(data);
+        let rowId = -1;
+        if (this.rdbStore) {
+            try {
+                rowId = await this.rdbStore.insert(CommonConstants.ACCOUNT_TABLE.tableName, insertData);
+                if (isSync) {
+                    await this.syncData();
+                }
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in inserting data. rowId:${rowId}`);
+            }
+            catch (error) {
+                hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, `Failed to insert data. Code:${error.code}, message:${error.message}`);
+            }
+        }
+        return rowId;
+    }
+    /**
+     * Delete data
+     * @param data Delete data
+     * @param isSync isSync
+     * @returns
+     */
+    async deleteData(data, isSync = true) {
+        let rows = 0;
+        if (this.rdbStore) {
+            try {
+                let predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+                predicates.equalTo('id', data.id);
+                rows = await this.rdbStore.delete(predicates);
+                if (isSync) {
+                    await this.syncData();
+                }
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in delete data. rows:${rows}`);
+            }
+            catch (error) {
+                hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, `Failed to delete data. Code:${error.code}, message:${error.message}`);
+            }
+        }
+        return rows;
+    }
+    /**
+     * Update Data
+     * @param data update data
+     * @param isSync isSync
+     * @returns
+     */
+    async updateData(data, isSync = true) {
+        const valueBucket = this.generateBucket(data);
+        let rows = 0;
+        if (this.rdbStore) {
+            try {
+                let predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+                predicates.equalTo('id', data.id);
+                rows = await this.rdbStore.update(valueBucket, predicates);
+                if (isSync) {
+                    await this.syncData();
+                }
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in update data. rows:${rows}`);
+            }
+            catch (error) {
+                hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, `Failed to update data. Code:${error.code}, message:${error.message}`);
+            }
+        }
+        return rows;
+    }
+    /**
+     * query data
+     * @param searchValue query text
+     * @param isAll Do you want to query all data
+     * @returns
+     */
+    async query(searchValue, isAll = true) {
+        let result = [];
+        if (this.rdbStore) {
+            try {
+                let predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+                if (!isAll) {
+                    predicates.equalTo('typeText', searchValue);
+                }
+                const resultSet = await this.rdbStore.query(predicates, CommonConstants.ACCOUNT_TABLE.columns);
+                result = this.formatData(resultSet);
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in query data. resultSet:${resultSet}`);
+                if (result.length > 0) {
+                    resultSet.close();
+                }
+            }
+            catch (error) {
+                hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, `Failed to query data. Code:${error.code}, message:${error.message}`);
+            }
+        }
+        return result;
+    }
+    // Synchronize data.
+    async syncData() {
+        if (this.rdbStore) {
+            const deviceIds = this.getDeviceList();
+            if (deviceIds.length === 0) {
+                return;
+            }
+            // Construct predicate objects for synchronizing distributed tables.
+            const predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+            // Specify the list of devices to synchronize.
+            predicates.inDevices(deviceIds);
+            try {
+                // Call the interface for synchronizing data to push the current device data changes to other devices in the network.
+                const result = await this.rdbStore.sync(relationalStore.SyncMode.SYNC_MODE_PUSH, predicates);
+                // Obtain synchronization results.
+                for (let i = 0; i < result.length; i++) {
+                    const deviceId = result[i][0];
+                    const syncResult = result[i][1];
+                    if (syncResult === 0) {
+                        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `device:${deviceId} sync success`);
+                    }
+                    else {
+                        hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, `device:${deviceId} sync failed, status:${syncResult}`);
+                    }
+                }
+            }
+            catch (err) {
+                hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, 'Push data failed, code: ' + err.code + ', message: ' + err.message);
+            }
+        }
+    }
+    /**
+     * Query remote device data within the network
+     * @param device device id
+     * @returns
+     */
+    async remoteQuery(device) {
+        let list = [];
+        if (this.rdbStore) {
+            // Query the list of devices within the network.
+            // Construct predicate objects for synchronizing distributed tables.
+            const predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+            try {
+                // Query the distributed tables on devices within the network.
+                const resultSet = await this.rdbStore.remoteQuery(device, CommonConstants.ACCOUNT_TABLE.tableName, predicates, CommonConstants.ACCOUNT_TABLE.columns);
+                list = this.formatData(resultSet);
+                if (list.length > 0) {
+                    resultSet.close();
+                }
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'Remote query success, row cout: ' + resultSet.rowCount);
+                hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `ResultSet column names: ${resultSet.columnNames}, column count: ${resultSet.columnCount}`);
+            }
+            catch (err) {
+                hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG, 'Remote query failed, code: ' + err.code + ', message: ' + err.message);
+            }
+        }
+        return list;
+    }
+    // Format database data.
+    formatData(resultSet) {
+        let list = [];
+        let count = resultSet.rowCount;
+        if (count !== 0 && typeof count !== 'string') {
+            try {
+                resultSet.goToFirstRow();
+                for (let i = 0; i < count; i++) {
+                    let tmp = {
+                        id: '',
+                        accountType: 0,
+                        typeText: '',
+                        amount: 0
+                    };
+                    tmp.id = resultSet.getString(resultSet.getColumnIndex('id'));
+                    tmp.accountType = resultSet.getDouble(resultSet.getColumnIndex('accountType'));
+                    tmp.typeText = resultSet.getString(resultSet.getColumnIndex('typeText'));
+                    tmp.amount = resultSet.getDouble(resultSet.getColumnIndex('amount'));
+                    list[i] = tmp;
+                    resultSet.goToNextRow();
+                }
+            }
+            catch (error) {
+                hilog.error(0x0000, 'RdbManager', `have error .Code:${error.code},message: ${error.message}`);
+            }
+        }
+        return list;
+    }
+    /**
+     * Process data into ValuesBucket type
+     * @param account
+     * @returns
+     */
+    generateBucket(account) {
+        let obj = {};
+        obj.id = account.id;
+        obj.accountType = account.accountType;
+        obj.typeText = account.typeText;
+        obj.amount = account.amount;
+        return obj;
+    }
+    /**
+     * Update local database
+     * @param oldList
+     * @param newList
+     */
+    updateLocalDataBase(oldList, newList) {
+        const list = newList.concat(oldList);
+        const idList = new Set(list.map((item) => item.id));
+        idList.forEach((id) => {
+            const isFindInOldList = oldList.find((item) => id === item.id);
+            const isFindInNewList = newList.find((item) => id === item.id);
+            if (!isFindInOldList) {
+                const item = list.find((item) => id === item.id) || {};
+                this.insertData(item, false);
+            }
+            else if (!isFindInNewList) {
+                const item = list.find((item) => id === item.id) || {};
+                this.deleteData(item, false);
+            }
+            else {
+                const item = newList.find((item) => id === item.id) || {};
+                this.updateData(item, false);
+            }
+        });
+    }
+}
+//# sourceMappingURL=RdbManager.js.mapÂ”Ùt hvigor_ignore_C:_Program Files_Huawei_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.data.relationalStore.d.tsÙx hvigor_ignore_C:_Program Files_Huawei_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.distributedDeviceManager.d.tsÙe hvigor_ignore_C:_Program Files_Huawei_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.hilog.d.tsÙ>D:\Harmonyos\Rdb\entry\src\main\ets\common\CommonConstants.etsÙ8D:\Harmonyos\Rdb\entry\src\main\ets\utils\RdbManager.etsÔrBœªmoduleName±isLocalDependency¯isNodeEntryFile§pkgPath±belongProjectPath§pkgNameªpkgVersion±dependencyPkgInfo¯hostModulesInfo°belongModulePath§checker¬shouldEmitJs¥entryÃÂ¶D:\Harmonyos\Rdb\entry°D:\Harmonyos\Rdb¥entry¥1.0.0Ô  ‘ÔrC’²hostDependencyName®hostModuleName³../utils/RdbManager¥entry¶D:\Harmonyos\Rdb\entryÔrDÜ ®¬getNodeCount²getIdentifierCount®getSymbolCount¬getTypeCountµgetInstantiationCountµgetRelationCacheSizes±isUndefinedSymbol±isArgumentsSymbol¯isUnknownSymbol¯getMergedSymbol®getDiagnostics´getGlobalDiagnostics´getRecursionIdentity¶getUnmatchedProperties¹getTypeOfSymbolAtLocation¯getTypeOfSymbolÙ(getSymbolsOfParameterPropertyDeclaration·getDeclaredTypeOfSymbol³getPropertiesOfType±getPropertyOfTypeÙ"getPrivateIdentifierPropertyOfType·getTypeOfPropertyOfType²getIndexInfoOfType³getIndexInfosOfTypeºgetIndexInfosOfIndexSymbol³getSignaturesOfType²getIndexTypeOfType¬getIndexType¬getBaseTypes¸getBaseTypeOfLiteralType®getWidenedType³getTypeFromTypeNode°getParameterTypeÙ$getParameterIdentifierNameAtPosition¸getPromisedTypeOfPromise®getAwaitedType¸getReturnTypeOfSignature®isNullableType¯getNullableType²getNonNullableType²getNonOptionalType°getTypeArguments®typeToTypeNodeÙ$indexInfoToIndexSignatureDeclaration¿signatureToSignatureDeclaration²symbolToEntityName²symbolToExpression¬symbolToNodeÙ!symbolToTypeParameterDeclarations¼symbolToParameterDeclarationºtypeParameterToDeclaration±getSymbolsInScope³getSymbolAtLocation·getIndexInfosAtLocationÙ!getShorthandAssignmentValueSymbolÙ#getExportSpecifierLocalTargetSymbol·getExportSymbolOfSymbol±getTypeAtLocationºgetTypeAtLocationForLinterÙ tryGetTypeAtLocationWithoutCheckºgetTypeOfAssignmentPatternÙ*getPropertySymbolOfDestructuringAssignment±signatureToString¬typeToString®symbolToStringµtypePredicateToString®writeSignature©writeType«writeSymbol²writeTypePredicate¼getAugmentedPropertiesOfType®getRootSymbols²getSymbolOfExpando±getContextualTypeÙ(getContextualTypeForObjectLiteralElementÙ#getContextualTypeForArgumentAtIndexÙ getContextualTypeForJsxAttribute²isContextSensitiveÙ!getTypeOfPropertyOfContextualTypeµgetFullyQualifiedNameÙ#tryGetResolvedSignatureWithoutCheck´getResolvedSignatureÙ/getResolvedSignatureForStringLiteralCompletionsÙ$getResolvedSignatureForSignatureHelpµgetExpandedParameters¹hasEffectiveRestParameterºcontainsArgumentsReference°getConstantValueµisValidPropertyAccessÙ#isValidPropertyAccessForCompletions»getSignatureFromDeclarationºisImplementationOfOverload¹getImmediateAliasedSymbol°getAliasedSymbol¯getEmitResolver²getExportsOfModule¿getExportsAndPropertiesOfModuleÙ forEachExportAndPropertyOfModule¯getSymbolWalker±getAmbientModules¹getJsxIntrinsicTagNamesAt³isOptionalParameter»tryGetMemberInModuleExportsÙ(tryGetMemberInModuleExportsAndProperties´tryFindAmbientModuleÙ(tryFindAmbientModuleWithoutAugmentations¯getApparentType¬getUnionType²isTypeAssignableTo³createAnonymousType¯createSignature¬createSymbol¯createIndexInfoªgetAnyType­getStringType­getNumberType±createPromiseType¯createArrayType¹getElementTypeOfArrayType®getBooleanType¬getFalseType«getTrueType«getVoidType°getUndefinedType«getNullType¯getESSymbolType¬getNeverType¯getOptionalType®getPromiseType²getPromiseLikeType´getAsyncIterableType²isSymbolAccessible«isArrayType«isTupleType¯isArrayLikeTypeÙ#isTypeInvalidDueToUnionDiscriminantºgetExactOptionalProperties¿getAllPossiblePropertiesOfTypesÙ(getSuggestedSymbolForNonexistentPropertyÙ#getSuggestionForNonexistentPropertyÙ,getSuggestedSymbolForNonexistentJSXAttributeÙ&getSuggestedSymbolForNonexistentSymbolÙ!getSuggestionForNonexistentSymbolÙ&getSuggestedSymbolForNonexistentModuleÙ!getSuggestionForNonexistentExportÙ+getSuggestedSymbolForNonexistentClassMember·getBaseConstraintOfType»getDefaultFromTypeParameter«resolveName¯getJsxNamespaceµgetJsxFragmentFactory¸getAccessibleSymbolChain»getTypePredicateOfSignature¹resolveExternalModuleName»resolveExternalModuleSymbol°tryGetThisTypeAt¹getTypeArgumentConstraint¸getSuggestionDiagnostics¸runWithCancellationTokenÙ3getLocalTypeParametersOfClassOrInterfaceOrTypeAlias´isDeclarationVisible´isPropertyAccessible»getTypeOnlyAliasDeclaration¿getMemberOverrideModifierStatusÙ!isTypeParameterPossiblyReferenced²getConstEnumRelate´clearConstEnumRelateµdeleteConstEnumRelateÙ$getTypeArgumentsForResolvedSignatureµgetCheckedSourceFilesÙ"collectHaveTsNoCheckFilesForLinter·clearQualifiedNameCache®isStaticRecord²isStaticSourceFileÔ  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  ÃÃÚ3Ù/*
+ *  Copyright (c) 2025 Huawei Device Co., Ltd.
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+import { common } from '@kit.AbilityKit';
+import { relationalStore } from '@kit.ArkData';
+import { distributedDeviceManager } from '@kit.DistributedServiceKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import CommonConstants from '../common/CommonConstants';
+import { AccountData } from '../viewmodel/BillViewModel';
+
+// Relational data management category.
+export class RdbManager {
+  private rdbStore: relationalStore.RdbStore | null = null;
+  context: common.UIAbilityContext | null = null;
+  localDeviceNetworkId: string = '';
+
+  constructor(context: common.UIAbilityContext) {
+    this.context = context;
+  }
+
+  // Set distributed properties for data tables.
+  async setDistributedTables(context: Context) {
+    try {
+      this.rdbStore = await relationalStore.getRdbStore(context, CommonConstants.STORE_CONFIG);
+      await this.rdbStore.executeSql(CommonConstants.ACCOUNT_TABLE.sqlCreate);
+      // Set the created table as a distributed table.
+      await this.rdbStore.setDistributedTables([CommonConstants.ACCOUNT_TABLE.tableName]);
+    } catch (error) {
+      hilog.error(0x0000, 'RdbManager', `have error .Code:${error.code}, message: ${error.message}`);
+    }
+  }
+
+  // Subscribe to data change messages from other devices within the network.
+  subscribeDataChange() {
+    if (this.rdbStore) {
+      try {
+        // Call the distributed data subscription interface to register observers for the database.
+        // When data changes occur in a distributed database, a callback will be called.
+        this.rdbStore.on('dataChange', relationalStore.SubscribeType.SUBSCRIBE_TYPE_REMOTE, async (devices) => {
+          hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'dataChange devices ' + devices);
+          for (let i = 0; i < devices.length; i++) {
+            let device = devices[i];
+            if (!this.rdbStore) {
+              return;
+            }
+            hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `The data of device:${device} has been changed.`);
+            const result = await this.remoteQuery(device);
+            this.context?.eventHub.emit('dataChange', JSON.stringify(result));
+          }
+        });
+      } catch (err) {
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          `Failed to register observer. Code:${err.code},message:${err.message}`);
+      }
+    }
+  }
+
+  // Get local device ID.
+  getLocalDeviceNetworkId() {
+    try {
+      // create deviceManager.
+      const deviceManager = distributedDeviceManager.createDeviceManager('com.example.crossDeviceDataSynchronization');
+      // DeviceIds is obtained by calling the getAvailableDeviceListSync method by the DeviceManager.
+      if (deviceManager != null) {
+        this.localDeviceNetworkId = deviceManager.getLocalDeviceNetworkId();
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          'local device networkId: ' + JSON.stringify(this.localDeviceNetworkId));
+      }
+    } catch (err) {
+      hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+        `Failed to insert data. Code:${err.code}, message:${err.message}`);
+    }
+  }
+
+  // Query the list of devices within the network.
+  getDeviceList(): string[] {
+    let deviceManager: distributedDeviceManager.DeviceManager;
+    let deviceIds: string[] = [];
+    try {
+      // create deviceManager.
+      deviceManager = distributedDeviceManager.createDeviceManager('com.example.crossDeviceDataSynchronization');
+      // DeviceIds is obtained by calling the getAvailableDeviceListSync method by the DeviceManager.
+      if (deviceManager != null) {
+        let devices = deviceManager.getAvailableDeviceListSync();
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'devices size ' + devices.length);
+        for (let i = 0; i < devices.length; i++) {
+          deviceIds[i] = devices[i].networkId as string;
+          hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'devices size ' + deviceIds[i]);
+        }
+      }
+    } catch (err) {
+      hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+        `Failed to insert data. Code:${err.code}, message:${err.message}`);
+    }
+    return deviceIds;
+  }
+
+  /**
+   * Add new data
+   * @param data add data
+   * @param isSync isSync
+   * @returns
+   */
+  async insertData(data: AccountData, isSync: boolean = true) {
+    const insertData = this.generateBucket(data);
+    let rowId: number = -1;
+    if (this.rdbStore) {
+      try {
+        rowId = await this.rdbStore.insert(CommonConstants.ACCOUNT_TABLE.tableName, insertData);
+        if (isSync) {
+          await this.syncData();
+        }
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in inserting data. rowId:${rowId}`);
+      } catch (error) {
+        hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          `Failed to insert data. Code:${error.code}, message:${error.message}`);
+      }
+    }
+    return rowId;
+  }
+
+  /**
+   * Delete data
+   * @param data Delete data
+   * @param isSync isSync
+   * @returns
+   */
+  async deleteData(data: AccountData, isSync: boolean = true) {
+    let rows: number = 0;
+    if (this.rdbStore) {
+      try {
+        let predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+        predicates.equalTo('id', data.id);
+        rows = await this.rdbStore.delete(predicates);
+        if (isSync) {
+          await this.syncData();
+        }
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in delete data. rows:${rows}`);
+      } catch (error) {
+        hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          `Failed to delete data. Code:${error.code}, message:${error.message}`);
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * Update Data
+   * @param data update data
+   * @param isSync isSync
+   * @returns
+   */
+  async updateData(data: AccountData, isSync: boolean = true) {
+    const valueBucket: relationalStore.ValuesBucket = this.generateBucket(data);
+    let rows = 0;
+    if (this.rdbStore) {
+      try {
+        let predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+        predicates.equalTo('id', data.id);
+        rows = await this.rdbStore.update(valueBucket, predicates);
+        if (isSync) {
+          await this.syncData();
+        }
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in update data. rows:${rows}`);
+      } catch (error) {
+        hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          `Failed to update data. Code:${error.code}, message:${error.message}`);
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * query data
+   * @param searchValue query text
+   * @param isAll Do you want to query all data
+   * @returns
+   */
+  async query(searchValue: string, isAll: boolean = true) {
+    let result: AccountData[] = [];
+    if (this.rdbStore) {
+      try {
+        let predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+        if (!isAll) {
+          predicates.equalTo('typeText', searchValue);
+        }
+        const resultSet: relationalStore.ResultSet =
+          await this.rdbStore.query(predicates, CommonConstants.ACCOUNT_TABLE.columns);
+        result = this.formatData(resultSet);
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `Succeeded in query data. resultSet:${resultSet}`);
+        if (result.length > 0) {
+          resultSet.close();
+        }
+      } catch (error) {
+        hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          `Failed to query data. Code:${error.code}, message:${error.message}`);
+      }
+    }
+    return result;
+  }
+
+  // Synchronize data.
+  async syncData() {
+    if (this.rdbStore) {
+      const deviceIds: string[] = this.getDeviceList();
+      if (deviceIds.length === 0) {
+        return;
+      }
+      // Construct predicate objects for synchronizing distributed tables.
+      const predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+      // Specify the list of devices to synchronize.
+      predicates.inDevices(deviceIds);
+      try {
+        // Call the interface for synchronizing data to push the current device data changes to other devices in the network.
+        const result = await this.rdbStore.sync(relationalStore.SyncMode.SYNC_MODE_PUSH, predicates);
+        // Obtain synchronization results.
+        for (let i = 0; i < result.length; i++) {
+          const deviceId = result[i][0];
+          const syncResult = result[i][1];
+          if (syncResult === 0) {
+            hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, `device:${deviceId} sync success`);
+          } else {
+            hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+              `device:${deviceId} sync failed, status:${syncResult}`);
+          }
+        }
+      } catch (err) {
+        hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          'Push data failed, code: ' + err.code + ', message: ' + err.message);
+      }
+    }
+  }
+
+  /**
+   * Query remote device data within the network
+   * @param device device id
+   * @returns
+   */
+  public async remoteQuery(device: string) {
+    let list: AccountData[] = [];
+    if (this.rdbStore) {
+      // Query the list of devices within the network.
+      // Construct predicate objects for synchronizing distributed tables.
+      const predicates = new relationalStore.RdbPredicates(CommonConstants.ACCOUNT_TABLE.tableName);
+      try {
+        // Query the distributed tables on devices within the network.
+        const resultSet = await this.rdbStore.remoteQuery(device, CommonConstants.ACCOUNT_TABLE.tableName, predicates,
+          CommonConstants.ACCOUNT_TABLE.columns);
+        list = this.formatData(resultSet);
+        if (list.length > 0) {
+          resultSet.close();
+        }
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG, 'Remote query success, row cout: ' + resultSet.rowCount);
+        hilog.info(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          `ResultSet column names: ${resultSet.columnNames}, column count: ${resultSet.columnCount}`);
+      } catch (err) {
+        hilog.error(0x0000, 'hilog', CommonConstants.RDB_TAG,
+          'Remote query failed, code: ' + err.code + ', message: ' + err.message);
+      }
+    }
+    return list;
+  }
+
+  // Format database data.
+  formatData(resultSet: relationalStore.ResultSet) {
+    let list: AccountData[] = [];
+    let count: number = resultSet.rowCount;
+    if (count !== 0 && typeof count !== 'string') {
+      try {
+        resultSet.goToFirstRow();
+        for (let i = 0; i < count; i++) {
+          let tmp: AccountData = {
+            id: '',
+            accountType: 0,
+            typeText: '',
+            amount: 0
+          };
+          tmp.id = resultSet.getString(resultSet.getColumnIndex('id'));
+          tmp.accountType = resultSet.getDouble(resultSet.getColumnIndex('accountType'));
+          tmp.typeText = resultSet.getString(resultSet.getColumnIndex('typeText'));
+          tmp.amount = resultSet.getDouble(resultSet.getColumnIndex('amount'));
+          list[i] = tmp;
+          resultSet.goToNextRow();
+        }
+      } catch (error) {
+        hilog.error(0x0000, 'RdbManager', `have error .Code:${error.code},message: ${error.message}`);
+      }
+    }
+    return list;
+  }
+
+  /**
+   * Process data into ValuesBucket type
+   * @param account
+   * @returns
+   */
+  generateBucket(account: AccountData): relationalStore.ValuesBucket {
+    let obj: relationalStore.ValuesBucket = {};
+    obj.id = account.id;
+    obj.accountType = account.accountType;
+    obj.typeText = account.typeText;
+    obj.amount = account.amount;
+    return obj;
+  }
+
+  /**
+   * Update local database
+   * @param oldList
+   * @param newList
+   */
+  updateLocalDataBase(oldList: Array<AccountData>, newList: Array<AccountData>) {
+    const list: Array<AccountData> = newList.concat(oldList);
+    const idList = new Set(list.map((item: AccountData) => item.id));
+    idList.forEach((id: string) => {
+      const isFindInOldList = oldList.find((item: AccountData) => id === item.id);
+      const isFindInNewList = newList.find((item: AccountData) => id === item.id);
+      if (!isFindInOldList) {
+        const item: AccountData = list.find((item: AccountData) => id === item.id) || {} as AccountData;
+        this.insertData(item, false);
+      } else if (!isFindInNewList) {
+        const item: AccountData = list.find((item: AccountData) => id === item.id) || {} as AccountData;
+        this.deleteData(item, false);
+      } else {
+        const item: AccountData = newList.find((item: AccountData) => id === item.id) || {} as AccountData;
+        this.updateData(item, false);
+      }
+    });
+  }
+}ÀÔrE”º@ohos.data.relationalStore¾@ohos.distributedDeviceManager«@ohos.hilog¹../common/CommonConstantsÔrF—ªassertions¨external¢id¤meta±moduleSideEffectsªresolvedByµsyntheticNamedExportsAÃÙt hvigor_ignore_C:_Program Files_Huawei_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.data.relationalStore.d.tsAÃªoh-resolveÂFAÃÙx hvigor_ignore_C:_Program Files_Huawei_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.distributedDeviceManager.d.tsÔrG‘¯hostModulesInfo‘C¾@ohos.distributedDeviceManager¥entryÃªoh-resolveÂFAÃÙe hvigor_ignore_C:_Program Files_Huawei_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.hilog.d.tsAÃªoh-resolveÂFAÂÙ>D:\Harmonyos\Rdb\entry\src\main\ets\common\CommonConstants.etsAÃªoh-resolveÂ“ÔrH–§version¤fileªsourceRoot§sources¥names¨mappings­RdbManager.js ‘®RdbManager.etsÜ5–”   ” 	” ”  ”8 .”9 /–”   ” 	” !”% )”ÌE ÌE”ÌF ÌF–”   ” 	” ” ” 3”  4–”   ” ” ” ”7 7”8 8’”   ”' '””   ” ” ” “” ” ” .•” 
+” ” 6” :” ;•” ” 	” ,” 0” 1•” ”! ”$ !”& #”' $—” ” ” 	” ” ” ” ’” ” ’”  ”2  0–” !”	 !”
+ !” !” !”& !-’” "” "Ü ” #” #
+” #” #” #”" #”1 #+”2 #,”= #7”> #8”ÌE #?”ÌG #ÌA”ÌV #ÌP”ÌW #ÌQ”Ìc #Ì]”Ìd #Ì^”Ìe #Ì_Ÿ” $” $” $” $” $”  $”* $$”+ $%”: $4”; $5”ÌH $ÌB”ÌI $ÌC”ÌR $ÌL”ÌS $ÌM”ÌT $ÌN’” %”< %6Ü ” &” &” &” &” &”  &”4 &.”5 &/”6 &0”ÌE &?”ÌF &Ì@”ÌS &ÌM”ÌT &ÌN”Ì] &ÌW”Ì^ &ÌX”Ì_ &ÌY”Ì` &ÌZ‘”	 '”” '” '” '” 'Ü ” (” (” (” (” (” (”  (”, (&”. ((”ÌB (<”ÌG (ÌA”ÌH (ÌB”ÌL (ÌF”ÌZ (ÌT”Ì_ (ÌY”Ì` (ÌZ”Ìg (Ìa”Ìi (Ìc”Ìj (Ìd”Ìk (Ìe‘”	 )’” *” *’” ,”ÌO ,ÌM’” -” -–” .” .” .” .” .” .’” /” /
+’” 0”Ìk 0Ìc’” 1”Ì` 1ÌXÜ ” 2” 2” 2” 2” 2”  2”! 2”- 2%”/ 2'”> 26”? 27”ÌL 2ÌD”ÌM 2ÌE”Ìb 2ÌZ”Ìd 2Ì\”Ìi 2Ìa”Ìk 2Ìc”Ìr 2Ìj”Ìt 2Ìl”Ìv 2ÌnÜ ” 3
+” 3” 3” 3” 3”% 3”' 3”. 3$”0 3&”? 35”Ì@ 36”ÌG 3=”ÌI 3?”Ì^ 3ÌT”Ìa 3ÌW”Ìh 3Ì^”Ìi 3Ì_”Ìj 3Ì`Ü ” 4
+” 4” 4” 4”! 4”" 4”$ 4”% 4”( 4”/ 4%”0 4&”6 4,”8 4.”9 4/”; 41”= 43™” 5” 5”" 5”% 5”, 5 ”- 5!”. 5"”/ 5#”0 5$—” 6” 6” 6”! 6”" 6”* 6”, 6 ’” 7”# 7‘” 8Ü ” 9” 9” 9”" 9”# 9”) 9”+ 9”2 9&”4 9(”ÌC 97”ÌD 98”ÌK 9?”ÌM 9ÌA”Ìc 9ÌW”Ìi 9Ì]”Ì} 9Ìq”Ì~ 9Ìr”Ì 9Ìsœ” :” :”$ :”' :”- :!”1 :%”2 :&”= :1”> :2”ÌD :8”ÌE :9”ÌF ::Ü ” ;” ;” ;”$ ;”& ;”. ;"”/ ;#”3 ;'”4 ;(”Ì@ ;4”ÌB ;6”ÌF ;:”ÌG ;;”ÌP ;ÌD”ÌQ ;ÌE”ÌW ;ÌK”ÌX ;ÌL”ÌY ;ÌM”ÌZ ;ÌN‘” <”” =” =	” =
+” =‘” >”” >” >” >” >Ü ” ?” ?” ?” ?” ?”! ?”# ?”* ?"”, ?$”; ?3”< ?4”ÌC ?;”ÌE Ì@
+”Ìj Ì@/”Ìm Ì@2”Ìn Ì@3”Ìr Ì@7”Ì~ Ì@ÌC”Ì Ì@ÌF”Ì‚ Ì@ÌG”Ì‰ Ì@ÌN”Ì‹ Ì@ÌP”ÌŒ Ì@ÌQ”Ì Ì@ÌR‘” ÌA‘”	 ÌB’” ÌC” ÌC’” ÌE” ÌE’” ÌF” ÌF’” ÌG” ÌG’” ÌH”$ ÌH›” ÌI” ÌI” ÌI”" ÌI”: ÌI4”; ÌI5”ÌN ÌIÌH”ÌO ÌIÌI”Ì{ ÌIÌu”Ì| ÌIÌv”Ì} ÌIÌw’” ÌJ”Ìk ÌJÌe–” ÌK” ÌK
+” ÌK”! ÌK”% ÌK”' ÌK!š” ÌL” ÌL” ÌL”) ÌL!”, ÌL$”9 ÌL1”: ÌL2”ÌQ ÌLÌI”ÌS ÌLÌK”ÌT ÌLÌLÜ ” ÌM” ÌM” ÌM” ÌM” ÌM”! ÌM”# ÌM”* ÌM"”, ÌM$”; ÌM3”< ÌM4”ÌC ÌM;”ÌE ÌN
+”Ì_ ÌN$”Ìb ÌN'”Ìf ÌN+”Ìg ÌN,”Ìp ÌN5”Ìq ÌN6”Ìu ÌN:”Ìv ÌN;”ÌŠ ÌNÌO”Ì‹ ÌNÌP”ÌŒ ÌNÌQ”Ì ÌNÌR‘” ÌO‘”	 ÌP”” ÌP” ÌP” ÌP” ÌPÜ ” ÌQ” ÌQ” ÌQ” ÌQ” ÌQ” ÌQ”  ÌQ”' ÌQ!”) ÌQ#”8 ÌQ2”9 ÌQ3”Ì@ ÌQ:”ÌB ÌR”Ìa ÌR'”Ìd ÌR*”Ìe ÌR+”Ìi ÌR/”Ìv ÌR<”Ìy ÌR?”Ìz ÌRÌ@”Ì ÌRÌG”Ìƒ ÌRÌI”Ì„ ÌRÌJ”Ì… ÌRÌK‘”	 ÌS’” ÌT” ÌT’” ÌV”4 ÌV2’” ÌW” ÌW”” ÌX” ÌX” ÌX=” ÌX>–” ÌY” ÌY” ÌY” ÌY” ÌY ” ÌY!’” ÌZ” ÌZ’” Ì[”$ Ì[š” Ì\” Ì\” Ì\”4 Ì\.”5 Ì\/”ÌH Ì\ÌB”ÌI Ì\ÌC”Ìu Ì\Ìo”Ìv Ì\Ìp”Ìw Ì\Ìq’” Ì]”Ìk Ì]Ìe–” Ì^” Ì^
+” Ì^”! Ì^”% Ì^”' Ì^!™” Ì_” Ì_” Ì_” Ì_”+ Ì_#”, Ì_$”ÌF Ì_>”ÌH Ì_Ì@”ÌI Ì_ÌAÜ ” Ì`” Ì`” Ì`” Ì`” Ì`”! Ì`”# Ì`”* Ì`"”, Ì`$”; Ì`3”< Ì`4”ÌC Ì`;”ÌE Ì`=”ÌT Ì`ÌL”ÌW Ì`ÌO”Ì^ Ì`ÌV”Ì_ Ì`ÌW”Ìe Ì`Ì]”Ìf Ì`Ì^”Ìg Ì`Ì_Ü ” Ìa” Ìa” Ìa” Ìa” Ìa” Ìa”  Ìa”! Ìa”$ Ìa”+ Ìa#”, Ìa$”2 Ìa*”4 Ìa,”5 Ìa-”7 Ìa/”9 Ìa1” Ìb
+” Ìb” Ìb” Ìb”  Ìb”# Ìb”* Ìb ”+ Ìb!”, Ìb"”- Ìb#”. Ìb$”7 Ìb7”8 Ìb8Ü ” Ìc
+” Ìc” Ìc” Ìc” Ìc”% Ìc”' Ìc”. Ìc$”0 Ìc&”? Ìc5”Ì@ Ìc6”ÌG Ìc=”ÌI Ìc?”ÌX ÌcÌN”Ì[ ÌcÌQ”Ìd ÌcÌZ”Ìe ÌcÌ[”Ìf ÌcÌ\”Ìg ÌcÌ]”Ìh ÌcÌ^”Ìi ÌcÌ_‘” Ìd	‘” Ìe‘”	 Ìf”” Ìf” Ìf” Ìf” ÌfÜ ” Ìg” Ìg” Ìg” Ìg” Ìg” Ìg”  Ìg”' Ìg!”) Ìg#”8 Ìg2”9 Ìg3”Ì@ Ìg:”ÌB Ìh”Ìa Ìh'”Ìd Ìh*”Ìe Ìh+”Ìi Ìh/”Ìv Ìh<”Ìy Ìh?”Ìz ÌhÌ@”Ì ÌhÌG”Ìƒ ÌhÌI”Ì„ ÌhÌJ”Ì… ÌhÌK‘”	 Ìi”” Ìj” Ìj” Ìj” Ìj’” Ìk” Ìk‘” Ìm‘” Ìr™” Ìs”	 Ìs”
+ Ìs” Ìs” Ìs” Ìs$” Ìs&”$ Ìs8”( Ìs<›” Ìt” Ìt
+” Ìt” Ìt” Ìt”  Ìt”. Ìt*”/ Ìt+”3 Ìt/”4 Ìt0”5 Ìt1—” Ìu” Ìu” Ìu” Ìu” Ìu” Ìu” Ìu–” Ìv” Ìv” Ìv” Ìv” Ìv” Ìv’” Ìw” Ìw
+Ü ” Ìx” Ìx” Ìx” Ìx”" Ìx”# Ìx”+ Ìx#”, Ìx$”2 Ìx*”3 Ìx+”ÌB Ìx:”ÌC Ìx;”ÌP ÌxÌH”ÌQ ÌxÌI”ÌZ ÌxÌR”Ì\ ÌxÌT”Ìf ÌxÌ^”Ìg ÌxÌ_”Ìh ÌxÌ`”” Ìy” Ìy” Ìy” Ìy—” Ìz
+” Ìz” Ìz” Ìz”' Ìz”) Ìz”* Ìz ‘” Ì{	Ü ” Ì|” Ì|” Ì|” Ì|” Ì|”! Ì|”# Ì|”* Ì|"”, Ì|$”; Ì|3”< Ì|4”ÌC Ì|;”ÌE Ì|=”Ìk Ì|Ìc”Ìp Ì|Ìh”Ìr Ì|Ìj”Ìs Ì|Ìk”Ìt Ì|Ìl‘” Ì}”” Ì}” Ì}” Ì}” Ì}Ü ” Ì~” Ì~” Ì~” Ì~” Ì~”" Ì~”$ Ì~”+ Ì~#”- Ì~%”< Ì~4”= Ì~5”ÌD Ì~<”ÌF Ì
+”Ìe Ì)”Ìj Ì.”Ìk Ì/”Ìo Ì3”Ì| ÌÌ@”Ì ÌÌE”Ì‚ ÌÌF”Ì‰ ÌÌM”Ì‹ ÌÌO”ÌŒ ÌÌP”Ì ÌÌQ‘” Ì€‘”	 Ì”” Ì‚” Ì‚” Ì‚” Ì‚’” Ìƒ” Ìƒ‘” Ì…‘” ÌŠ™” Ì‹”	 Ì‹”
+ Ì‹” Ì‹” Ì‹” Ì‹$” Ì‹&”$ Ì‹8”( Ì‹<–” ÌŒ” ÌŒ” ÌŒ” ÌŒ” ÌŒ” ÌŒ–” Ì” Ì” Ì” Ì” Ì” Ì’” Ì” Ì
+Ü ” Ì” Ì” Ì”! Ì”% Ì”4 Ì,”5 Ì-”ÌB Ì:”ÌC Ì;”ÌR ÌÌJ”ÌS ÌÌK”Ì` ÌÌX”Ìa ÌÌY”Ìj ÌÌb”Ìk ÌÌc”Ìl ÌÌdœ” Ì” Ì” Ì”" Ì”# Ì”' Ì”) Ì!”- Ì%”. Ì&”0 Ì(”1 Ì)”2 Ì*” Ì‘” Ì‘” Ì‘” Ì‘”! Ì‘”" Ì‘”* Ì‘"”+ Ì‘#”1 Ì‘)”2 Ì‘*”< Ì‘4”= Ì‘5”> Ì‘6”” Ì’” Ì’” Ì’” Ì’—” Ì“
+” Ì“” Ì“” Ì“”' Ì“”) Ì“”* Ì“ ‘” Ì”	Ü ” Ì•” Ì•” Ì•” Ì•” Ì•”! Ì•”# Ì•”* Ì•"”, Ì•$”; Ì•3”< Ì•4”ÌC Ì•;”ÌE Ì•=”Ìg Ì•Ì_”Ìk Ì•Ìc”Ìm Ì•Ìe”Ìn Ì•Ìf”Ìo Ì•Ìg‘” Ì–”” Ì–” Ì–” Ì–” Ì–Ü ” Ì—” Ì—” Ì—” Ì—” Ì—”" Ì—”$ Ì—”+ Ì—#”- Ì—%”< Ì—4”= Ì—5”ÌD Ì—<”ÌF Ì˜
+”Ìe Ì˜)”Ìj Ì˜.”Ìk Ì˜/”Ìo Ì˜3”Ì| Ì˜Ì@”Ì Ì˜ÌE”Ì‚ Ì˜ÌF”Ì‰ Ì˜ÌM”Ì‹ Ì˜ÌO”ÌŒ Ì˜ÌP”Ì Ì˜ÌQ‘” Ì™‘”	 Ìš”” Ì›” Ì›” Ì›” Ì›’” Ìœ” Ìœ‘” Ì‘” Ì£™” Ì¤”	 Ì¤”
+ Ì¤” Ì¤” Ì¤” Ì¤$” Ì¤&”$ Ì¤8”( Ì¤<›” Ì¥” Ì¥
+” Ì¥” Ì¥6”  Ì¥:”! Ì¥;”/ Ì¥ÌI”0 Ì¥ÌJ”4 Ì¥ÌN”5 Ì¥ÌO”6 Ì¥ÌP–” Ì¦” Ì¦” Ì¦” Ì¦” Ì¦” Ì¦–” Ì§” Ì§” Ì§” Ì§” Ì§” Ì§’” Ì¨” Ì¨
+Ü ” Ì©” Ì©” Ì©”! Ì©”% Ì©”4 Ì©,”5 Ì©-”ÌB Ì©:”ÌC Ì©;”ÌR Ì©ÌJ”ÌS Ì©ÌK”Ì` Ì©ÌX”Ìa Ì©ÌY”Ìj Ì©Ìb”Ìk Ì©Ìc”Ìl Ì©Ìdœ” Ìª” Ìª” Ìª”" Ìª”# Ìª”' Ìª”) Ìª!”- Ìª%”. Ìª&”0 Ìª(”1 Ìª)”2 Ìª*Ÿ” Ì«” Ì«” Ì«” Ì«”! Ì«”" Ì«”* Ì«"”+ Ì«#”1 Ì«)”2 Ì«*”= Ì«5”? Ì«7”ÌI Ì«ÌA”ÌJ Ì«ÌB”ÌK Ì«ÌC”” Ì¬” Ì¬” Ì¬” Ì¬—” Ì­
+” Ì­” Ì­” Ì­”' Ì­”) Ì­”* Ì­ ‘” Ì®	Ü ” Ì¯” Ì¯” Ì¯” Ì¯” Ì¯”! Ì¯”# Ì¯”* Ì¯"”, Ì¯$”; Ì¯3”< Ì¯4”ÌC Ì¯;”ÌE Ì¯=”Ìg Ì¯Ì_”Ìk Ì¯Ìc”Ìm Ì¯Ìe”Ìn Ì¯Ìf”Ìo Ì¯Ìg‘” Ì°”” Ì°” Ì°” Ì°” Ì°Ü ” Ì±” Ì±” Ì±” Ì±” Ì±”" Ì±”$ Ì±”+ Ì±#”- Ì±%”< Ì±4”= Ì±5”ÌD Ì±<”ÌF Ì²
+”Ìe Ì²)”Ìj Ì².”Ìk Ì²/”Ìo Ì²3”Ì| Ì²Ì@”Ì Ì²ÌE”Ì‚ Ì²ÌF”Ì‰ Ì²ÌM”Ì‹ Ì²ÌO”ÌŒ Ì²ÌP”Ì Ì²ÌQ‘” Ì³‘”	 Ì´”” Ìµ” Ìµ” Ìµ” Ìµ’” Ì¶” Ì¶‘” Ì¸‘” Ì½™” Ì¾”	 Ì¾”
+ Ì¾” Ì¾” Ì¾” Ì¾!” Ì¾#”% Ì¾4”) Ì¾8–” Ì¿” Ì¿” Ì¿” Ì¿ ” Ì¿"” Ì¿#–” ÌÀ” ÌÀ” ÌÀ” ÌÀ” ÌÀ” ÌÀ’” ÌÁ” ÌÁ
+Ü ” ÌÂ” ÌÂ” ÌÂ”! ÌÂ”% ÌÂ”4 ÌÂ,”5 ÌÂ-”ÌB ÌÂ:”ÌC ÌÂ;”ÌR ÌÂÌJ”ÌS ÌÂÌK”Ì` ÌÂÌX”Ìa ÌÂÌY”Ìj ÌÂÌb”Ìk ÌÂÌc”Ìl ÌÂÌd•” ÌÃ” ÌÃ” ÌÃ” ÌÃ” ÌÃš” ÌÄ
+” ÌÄ” ÌÄ”& ÌÄ”' ÌÄ”1 ÌÄ'”3 ÌÄ)”> ÌÄ4”? ÌÄ5”Ì@ ÌÄ6‘” ÌÅ	Ü ” ÌÆ” ÌÆ” ÌÆ”" ÌÇ
+”( ÌÇ”, ÌÇ”- ÌÇ”5 ÌÇ”6 ÌÇ”; ÌÇ#”< ÌÇ$”ÌF ÌÇ.”ÌH ÌÇ0”ÌW ÌÇ?”ÌX ÌÇÌ@”Ìe ÌÇÌM”Ìf ÌÇÌN”Ìm ÌÇÌU”Ìn ÌÇÌV”Ìo ÌÇÌWš” ÌÈ” ÌÈ” ÌÈ” ÌÈ” ÌÈ”( ÌÈ ”) ÌÈ!”2 ÌÈ*”3 ÌÈ+”4 ÌÈ,Ü ” ÌÉ” ÌÉ” ÌÉ” ÌÉ” ÌÉ”! ÌÉ”# ÌÉ”* ÌÉ"”, ÌÉ$”; ÌÉ3”< ÌÉ4”ÌC ÌÉ;”ÌE ÌÉ=”Ìk ÌÉÌc”Ìt ÌÉÌl”Ìv ÌÉÌn”Ìw ÌÉÌo”Ìx ÌÉÌp˜” ÌÊ” ÌÊ” ÌÊ” ÌÊ”! ÌÊ”$ ÌÊ”% ÌÊ”' ÌÊ–” ÌË
+” ÌË” ÌË”# ÌË”% ÌË”& ÌË‘” ÌÌ	‘” ÌÍ”” ÌÍ” ÌÍ” ÌÍ” ÌÍÜ ” ÌÎ” ÌÎ” ÌÎ” ÌÎ” ÌÎ”" ÌÎ”$ ÌÎ”+ ÌÎ#”- ÌÎ%”< ÌÎ4”= ÌÎ5”ÌD ÌÎ<”ÌF ÌÏ
+”Ìd ÌÏ(”Ìi ÌÏ-”Ìj ÌÏ.”Ìn ÌÏ2”Ì{ ÌÏ?”Ì€ ÌÏÌD”Ì ÌÏÌE”Ìˆ ÌÏÌL”ÌŠ ÌÏÌN”Ì‹ ÌÏÌO”ÌŒ ÌÏÌP‘” ÌĞ‘”	 ÌÑ”” ÌÒ” ÌÒ” ÌÒ” ÌÒ’” ÌÓ” ÌÓ’” ÌÕ” ÌÕ”” ÌÖ”	 ÌÖ”
+ ÌÖ” ÌÖ–” Ì×” Ì×” Ì×” Ì×” Ì×” Ì×™” ÌØ” ÌØ” ÌØ” ÌØ"”" ÌØ&”# ÌØ'”0 ÌØ4”2 ÌØ6”3 ÌØ7˜” ÌÙ” ÌÙ
+” ÌÙ” ÌÙ”  ÌÙ”% ÌÙ”& ÌÙ ”( ÌÙ"’” ÌÚ” ÌÚ‘” ÌÛ’” ÌÜ”ÌP ÌÜÌJÜ ” Ìİ” Ìİ” Ìİ” Ìİ”# Ìİ”2 Ìİ,”3 Ìİ-”Ì@ Ìİ:”ÌA Ìİ;”ÌP ÌİÌJ”ÌQ ÌİÌK”Ì^ ÌİÌX”Ì_ ÌİÌY”Ìh ÌİÌb”Ìi ÌİÌc”Ìj ÌİÌd’” ÌŞ”: ÌŞ4˜” Ìß” Ìß” Ìß”  Ìß”! Ìß”* Ìß$”+ Ìß%”, Ìß&’” Ìà” Ìà
+’” Ìá”Ì… ÌáÌ}Ü ” Ìâ” Ìâ” Ìâ” Ìâ”% Ìâ”) Ìâ!”* Ìâ"”2 Ìâ*”3 Ìâ+”7 Ìâ/”8 Ìâ0”ÌG Ìâ?”ÌH ÌâÌ@”ÌP ÌâÌH”ÌQ ÌâÌI”Ì_ ÌâÌW”Ìa ÌâÌY”Ìk ÌâÌc”Ìl ÌâÌd”Ìm ÌâÌe’” Ìã”2 Ìã*Ü ” Ìä” Ìä” Ìä” Ìä” Ìä” Ìä”  Ìä”! Ìä”$ Ìä”* Ìä"”+ Ìä#”1 Ìä)”3 Ìä+”4 Ìä,”6 Ìä.”8 Ìä0œ” Ìå
+” Ìå”" Ìå”% Ìå”+ Ìå!”, Ìå"”- Ìå#”. Ìå$”/ Ìå%”0 Ìå&”1 Ìå'”2 Ìå(œ” Ìæ
+” Ìæ”$ Ìæ”' Ìæ”- Ìæ#”. Ìæ$”/ Ìæ%”0 Ìæ&”1 Ìæ'”2 Ìæ(”3 Ìæ)”4 Ìæ*–” Ìç
+” Ìç”" Ìç”' Ìç”( Ìç”* Ìç Ü ” Ìè” Ìè” Ìè”" Ìè”# Ìè”) Ìè”+ Ìè”2 Ìè&”4 Ìè(”ÌC Ìè7”ÌD Ìè8”ÌK Ìè?”ÌM ÌèÌA”ÌW ÌèÌK”Ì_ ÌèÌS”Ìn ÌèÌb”Ìo ÌèÌc”Ìp ÌèÌd‘” Ìé‘” ÌéÜ ” Ìê” Ìê” Ìê”# Ìê”$ Ìê”* Ìê”, Ìê ”3 Ìê'”5 Ìê)”ÌD Ìê8”ÌE Ìê9”ÌL ÌêÌ@”ÌN Ìë”ÌX Ìë”Ì` Ìë ”Ìx Ìë8”Ì‚ ÌëÌB”Ì„ ÌëÌD”Ì… ÌëÌE”Ì† ÌëÌF‘” Ìì‘” Ìí	‘” Ìî”” Ìî” Ìî” Ìî” ÌîÜ ” Ìï” Ìï” Ìï” Ìï” Ìï”" Ìï”$ Ìï”+ Ìï#”- Ìï%”< Ìï4”= Ìï5”ÌD Ìï<”ÌF Ìğ
+”Ì` Ìğ$”Ìc Ìğ'”Ìf Ìğ*”Ìg Ìğ+”Ìk Ìğ/”Ìn Ìğ2”Ì{ Ìğ?”Ì~ ÌğÌB”Ì ÌğÌE”Ì‚ ÌğÌF”Ì‰ ÌğÌM”ÌŠ ÌğÌN”Ì‹ ÌğÌO‘” Ìñ‘”	 Ìò’” Ìó” Ìó‘” Ìõ‘” Ìù–” Ìú	”	 Ìú”
+ Ìú” Ìú” Ìú” Ìú)–” Ìû” Ìû” Ìû” Ìû” Ìû ” Ìû!–” Ìü” Ìü” Ìü” Ìü” Ìü” Ìü’” Ìı”< Ìı6’” Ìş”ÌP ÌşÌJÜ ” Ìÿ” Ìÿ” Ìÿ” Ìÿ”# Ìÿ”2 Ìÿ,”3 Ìÿ-”Ì@ Ìÿ:”ÌA Ìÿ;”ÌP ÌÿÌJ”ÌQ ÌÿÌK”Ì^ ÌÿÌX”Ì_ ÌÿÌY”Ìh ÌÿÌb”Ìi ÌÿÌc”Ìj ÌÿÌd’” Í ” Í 
+’” Í”ÌN ÍÌFÜ ” Í” Í” Í”" Í”( Í ”, Í$”- Í%”5 Í-”6 Í.”ÌA Í9”ÌB Í:”ÌH ÍÌ@”ÌJ ÍÌB”ÌY ÍÌQ”ÌZ ÍÌR”Ìg ÍÌ_”Ìh ÍÌ`”Ìq ÍÌi”Ìs ÍÌk”Ì} ÍÌu”Ì Í
+”Ì Í”Ì Í”Ìœ Í'”Ì Í(”Ì¤ Í/”Ì¥ Í0”Ì¦ Í1š” Í” Í” Í” Í” Í”& Í”' Í”0 Í(”1 Í)”2 Í*˜” Í” Í” Í” Í” Í”" Í”# Í”% Í–” Í
+” Í” Í”# Í”% Í”& Í‘” Í	Ü ” Í” Í” Í” Í” Í”! Í”# Í”* Í"”, Í$”; Í3”< Í4”ÌC Í;”ÌE Í=”Ìg ÍÌ_”Ìj ÍÌb”Ìs ÍÌk”Ìt ÍÌl”Ì| ÍÌt”Ì} ÍÌu”Ì~ ÍÌvÜ ” Í	” Í	” Í	” Í	” Í	”! Í	”# Í	”* Í	"”, Í	$”; Í	3”< Í	4”ÌC Í	;”ÌE Í
+
+”Ì` Í
+%”Ìi Í
+.”Ìj Í
+/”Ìu Í
+:”Ìˆ Í
+ÌM”Ì‘ Í
+ÌV”Ì’ Í
+ÌW”Ì Í
+Ìb”ÌŸ Í
+Ìd”Ì  Í
+Ìe”Ì¡ Í
+Ìf‘” Í”” Í” Í” Í” ÍÜ ” Í” Í” Í” Í” Í”" Í”$ Í”+ Í#”- Í%”< Í4”= Í5”ÌD Í<”ÌF Í
+”Ìc Í'”Ìf Í*”Ìi Í-”Ìj Í.”Ìn Í2”Ìq Í5”Ì~ ÍÌB”Ì ÍÌE”Ì„ ÍÌH”Ì… ÍÌI”ÌŒ ÍÌP”Ì ÍÌQ”Ì ÍÌR‘” Í‘”	 Í”” Í” Í” Í” Í’” Í” Í’” Í” Í”” Í” Í” Í” Í1–” Í” Í” Í” Í” Í ” Í!˜” Í” Í” Í” Í” Í!” Í"”& Í*”' Í+›” Í” Í” Í” Í” Í” Í”" Í”' Í#”, Í(”4 Í0”6 Í2’” Í” Í
+–” Í” Í” Í”& Í”( Í ”) Í!” Í” Í” Í” Í” Í” Í”  Í”! Í”$ Í”) Í!”+ Í#”, Í$”. Í&”0 Í(”” Í
+” Í” Í” Í!”” Í” Í” Í” Í”” Í”# Í”% Í”& Í”” Í”  Í”" Í”$ Í”” Í” Í”  Í”! Í’” Í ” Í Ü ” Í!
+” Í!” Í!” Í!” Í!”& Í!”' Í!”0 Í!&”1 Í!'”: Í!0”; Í!1”ÌI Í!?”ÌJ Í!Ì@”ÌN Í!ÌD”ÌO Í!ÌE”ÌP Í!ÌF”ÌQ Í!ÌGÜ ” Í"
+” Í"” Í"”# Í"”& Í"”/ Í"%”0 Í"&”9 Í"/”: Í"0”ÌC Í"9”ÌD Í":”ÌR Í"ÌH”ÌS Í"ÌI”Ì` Í"ÌV”Ìa Í"ÌW”Ìb Í"ÌX”Ìc Í"ÌYÜ ” Í#
+” Í#” Í#”  Í#”# Í#”, Í#"”- Í##”6 Í#,”7 Í#-”Ì@ Í#6”ÌA Í#7”ÌO Í#ÌE”ÌP Í#ÌF”ÌZ Í#ÌP”Ì[ Í#ÌQ”Ì\ Í#ÌR”Ì] Í#ÌSÜ ” Í$
+” Í$” Í$” Í$”! Í$”* Í$ ”+ Í$!”4 Í$*”5 Í$+”> Í$4”? Í$5”ÌM Í$ÌC”ÌN Í$ÌD”ÌV Í$ÌL”ÌW Í$ÌM”ÌX Í$ÌN”ÌY Í$ÌO˜” Í%
+” Í%” Í%” Í%” Í%” Í%”! Í%”" Í%–” Í&
+” Í&” Í&”) Í&”+ Í&!”, Í&"‘” Í'	‘” Í(”” Í(” Í(” Í(” Í(Ü ” Í)” Í)” Í)” Í)” Í)”" Í)”$ Í)”0 Í)(”2 Í)*”ÌF Í)>”ÌK Í)ÌC”ÌL Í)ÌD”ÌP Í)ÌH”Ì] Í)ÌU”Ìb Í)ÌZ”Ìc Í)Ì[”Ìj Í)Ìb”Ìl Í)Ìd”Ìm Í)Ìe”Ìn Í)Ìf‘” Í*‘”	 Í+”” Í,” Í,” Í,” Í,’” Í-” Í-‘” Í/‘” Í3”” Í4” Í4” Í4” Í4%–” Í5” Í5” Í5” Í5,” Í5.” Í5/™” Í6” Í6” Í6” Í6
+” Í6” Í6” Í6” Í6” Í6™” Í7” Í7” Í7” Í7” Í7”! Í7”" Í7”- Í7)”. Í7*™” Í8” Í8” Í8” Í8” Í8” Í8” Í8”' Í8#”( Í8$™” Í9” Í9” Í9” Í9” Í9” Í9” Í9”# Í9”$ Í9 ”” Í:” Í:” Í:” Í:’” Í;” Í;‘” Í=‘” ÍA–” ÍB” ÍB” ÍB” ÍB1”! ÍB3”( ÍBÌN›” ÍC” ÍC
+” ÍC” ÍC%” ÍC,” ÍC-”# ÍC3”$ ÍC4”+ ÍC;”, ÍC<”- ÍC=Ü ” ÍD” ÍD
+” ÍD” ÍD” ÍD” ÍD” ÍD”# ÍD”$ ÍD ”' ÍD#”( ÍD$”) ÍD%”- ÍD6”/ ÍD8”1 ÍD:”2 ÍD;”6 ÍD?”7 ÍDÌ@”9 ÍDÌB”: ÍDÌC”; ÍDÌD”< ÍDÌE™” ÍE” ÍE
+” ÍE” ÍE” ÍE” ÍE” ÍE” ÍE ” ÍE"Ü ” ÍF” ÍF”! ÍF”$ ÍF”+ ÍF%”, ÍF&”0 ÍF*”1 ÍF+”2 ÍF,”6 ÍF=”8 ÍF?”: ÍFÌA”; ÍFÌB”= ÍFÌD”ÌB ÍFÌI”ÌF ÍFÌM”ÌG ÍFÌN”ÌI ÍFÌP”ÌJ ÍFÌQ”ÌK ÍFÌRÜ ” ÍG” ÍG”! ÍG”$ ÍG”+ ÍG%”, ÍG&”0 ÍG*”1 ÍG+”2 ÍG,”6 ÍG=”8 ÍG?”: ÍGÌA”; ÍGÌB”= ÍGÌD”ÌB ÍGÌI”ÌF ÍGÌM”ÌG ÍGÌN”ÌI ÍGÌP”ÌJ ÍGÌQ”ÌK ÍGÌR•” ÍH” ÍH
+” ÍH”  ÍH”" ÍHÜ ” ÍI” ÍI” ÍI” ÍI"”! ÍI&”" ÍI'”& ÍI+”' ÍI,”( ÍI-”, ÍI>”. ÍIÌ@”0 ÍIÌB”1 ÍIÌC”3 ÍIÌE”8 ÍIÌJ”< ÍIÌN”= ÍIÌO”? ÍIÌQ”Ì@ ÍIÌR”ÌD ÍIÌV”ÌF ÍIÌg”ÌG ÍIÌhš” ÍJ” ÍJ” ÍJ” ÍJ”  ÍJ”$ ÍJ”& ÍJ”+ ÍJ#”, ÍJ$”- ÍJ%‘” ÍK•” ÍK” ÍK” ÍK”% ÍK!”' ÍK#Ü ” ÍL” ÍL” ÍL” ÍL"”! ÍL&”" ÍL'”& ÍL+”' ÍL,”( ÍL-”, ÍL>”. ÍLÌ@”0 ÍLÌB”1 ÍLÌC”3 ÍLÌE”8 ÍLÌJ”< ÍLÌN”= ÍLÌO”? ÍLÌQ”Ì@ ÍLÌR”ÌD ÍLÌV”ÌF ÍLÌg”ÌG ÍLÌhš” ÍM” ÍM” ÍM” ÍM”  ÍM”$ ÍM”& ÍM”+ ÍM#”, ÍM$”- ÍM%‘” ÍN‘” ÍNÜ ” ÍO” ÍO” ÍO” ÍO"”$ ÍO)”% ÍO*”) ÍO.”* ÍO/”+ ÍO0”/ ÍOÌA”1 ÍOÌC”3 ÍOÌE”4 ÍOÌF”6 ÍOÌH”; ÍOÌM”? ÍOÌQ”Ì@ ÍOÌR”ÌB ÍOÌT”ÌC ÍOÌU”ÌG ÍOÌY”ÌI ÍOÌj”ÌJ ÍOÌkš” ÍP” ÍP” ÍP” ÍP”  ÍP”$ ÍP”& ÍP”+ ÍP#”, ÍP$”- ÍP%‘” ÍQ”” ÍR”	 ÍR”
+ ÍR” ÍR’” ÍS” ÍS‘” ÍTÔrI–§version¤file§sources®sourcesContent¥names¨mappingsÀ‘À‘ÀÜ6‘”    ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”  	 ‘”  
+ ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”    ‘”  ! ‘”  " ‘”  # ‘”  $ ‘”  % ‘”  & ‘”  ' ‘”  ( ‘”  ) ‘”  * ‘”  + ‘”  , ‘”  - ‘”  . ‘”  / ‘”  0 ‘”  1 ‘”  2 ‘”  3 ‘”  4 ‘”  5 ‘”  6 ‘”  7 ‘”  8 ‘”  9 ‘”  : ‘”  ; ‘”  < ‘”  = ‘”  > ‘”  ? ‘”  Ì@ ‘”  ÌA ‘”  ÌB ‘”  ÌC ‘”  ÌD ‘”  ÌE ‘”  ÌF ‘”  ÌG ‘”  ÌH ‘”  ÌI ‘”  ÌJ ‘”  ÌK ‘”  ÌL ‘”  ÌM ‘”  ÌN ‘”  ÌO ‘”  ÌP ‘”  ÌQ ‘”  ÌR ‘”  ÌS ‘”  ÌT ‘”  ÌU ‘”  ÌV ‘”  ÌW ‘”  ÌX ‘”  ÌY ‘”  ÌZ ‘”  Ì[ ‘”  Ì\ ‘”  Ì] ‘”  Ì^ ‘”  Ì_ ‘”  Ì` ‘”  Ìa ‘”  Ìb ‘”  Ìc ‘”  Ìd ‘”  Ìe ‘”  Ìf ‘”  Ìg ‘”  Ìh ‘”  Ìi ‘”  Ìj ‘”  Ìk ‘”  Ìl ‘”  Ìm ‘”  Ìn ‘”  Ìo ‘”  Ìp ‘”  Ìq ‘”  Ìr ‘”  Ìs ‘”  Ìt ‘”  Ìu ‘”  Ìv ‘”  Ìw ‘”  Ìx ‘”  Ìy ‘”  Ìz ‘”  Ì{ ‘”  Ì| ‘”  Ì} ‘”  Ì~ ‘”  Ì ‘”  Ì€ ‘”  Ì ‘”  Ì‚ ‘”  Ìƒ ‘”  Ì„ ‘”  Ì… ‘”  Ì† ‘”  Ì‡ ‘”  Ìˆ ‘”  Ì‰ ‘”  ÌŠ ‘”  Ì‹ ‘”  ÌŒ ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì‘ ‘”  Ì’ ‘”  Ì“ ‘”  Ì” ‘”  Ì• ‘”  Ì– ‘”  Ì— ‘”  Ì˜ ‘”  Ì™ ‘”  Ìš ‘”  Ì› ‘”  Ìœ ‘”  Ì ‘”  Ì ‘”  ÌŸ ‘”  Ì  ‘”  Ì¡ ‘”  Ì¢ ‘”  Ì£ ‘”  Ì¤ ‘”  Ì¥ ‘”  Ì¦ ‘”  Ì§ ‘”  Ì¨ ‘”  Ì© ‘”  Ìª ‘”  Ì« ‘”  Ì¬ ‘”  Ì­ ‘”  Ì® ‘”  Ì¯ ‘”  Ì° ‘”  Ì± ‘”  Ì² ‘”  Ì³ ‘”  Ì´ ‘”  Ìµ ‘”  Ì¶ ‘”  Ì· ‘”  Ì¸ ‘”  Ì¹ ‘”  Ìº ‘”  Ì» ‘”  Ì¼ ‘”  Ì½ ‘”  Ì¾ ‘”  Ì¿ ‘”  ÌÀ ‘”  ÌÁ ‘”  ÌÂ ‘”  ÌÃ ‘”  ÌÄ ‘”  ÌÅ ‘”  ÌÆ ‘”  ÌÇ ‘”  ÌÈ ‘”  ÌÉ ‘”  ÌÊ ‘”  ÌË ‘”  ÌÌ ‘”  ÌÍ ‘”  ÌÎ ‘”  ÌÏ ‘”  ÌĞ ‘”  ÌÑ ‘”  ÌÒ ‘”  ÌÓ ‘”  ÌÔ ‘”  ÌÕ ‘”  ÌÖ ‘”  Ì× ‘”  ÌØ ‘”  ÌÙ ‘”  ÌÚ ‘”  ÌÛ ‘”  ÌÜ ‘”  Ìİ ‘”  ÌŞ ‘”  Ìß ‘”  Ìà ‘”  Ìá ‘”  Ìâ ‘”  Ìã ‘”  Ìä ‘”  Ìå ‘”  Ìæ ‘”  Ìç ‘”  Ìè ‘”  Ìé ‘”  Ìê ‘”  Ìë ‘”  Ìì ‘”  Ìí ‘”  Ìî ‘”  Ìï ‘”  Ìğ ‘”  Ìñ ‘”  Ìò ‘”  Ìó ‘”  Ìô ‘”  Ìõ ‘”  Ìö ‘”  Ì÷ ‘”  Ìø ‘”  Ìù ‘”  Ìú ‘”  Ìû ‘”  Ìü ‘”  Ìı ‘”  Ìş ‘”  Ìÿ ‘”  Í  ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í	 ‘”  Í
+ ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í  ‘”  Í! ‘”  Í" ‘”  Í# ‘”  Í$ ‘”  Í% ‘”  Í& ‘”  Í' ‘”  Í( ‘”  Í) ‘”  Í* ‘”  Í+ ‘”  Í, ‘”  Í- ‘”  Í. ‘”  Í/ ‘”  Í0 ‘”  Í1 ‘”  Í2 ‘”  Í3 ‘”  Í4 ‘”  Í5 ÔrJ’§missing¦pluginÃ¦genAbcÂÔ  ÔrK”²dynamicImportCache¹exportAllDeclarationCache»exportNamedDeclarationCache«importCache‘ÔrL–¤type¥start£end«declarationªspecifiers¦source¶ExportNamedDeclarationÍÍ5±ÔrM–¤type¥start£end¢idªsuperClass¤body°ClassDeclarationÍÍ5±ÔrN”¤type¥start£end¤nameªIdentifierÍÍªRdbManagerÀÔrO”¤type¥start£end¤body©ClassBodyÍ Í5±ÔrP˜¤type¥start£end¦static¨computed£key¤kind¥value°MethodDefinitionÍ'ÍËÂÂNªIdentifierÍ'Í2«constructor«constructorÔrQ™¤type¥start£end¢idªexpression©generator¥async¦params¤body²FunctionExpressionÍ2ÍËÀÂÂÂ‘NªIdentifierÍ3Í:§contextO®BlockStatementÍ<ÍË”ÔrR”¤type¥start£endªexpression³ExpressionStatementÍGÍ\ÔrS–¤type¥start£end¨operator¤left¥right´AssignmentExpressionÍGÍ[¡=ÔrT—¤type¥start£end¦object¨property¨computed¨optional°MemberExpressionÍGÍTÔrU“¤type¥start£end®ThisExpressionÍGÍKNªIdentifierÍLÍT¨rdbStoreÂÂÔrV•¤type¥start£end¥value£raw§LiteralÍWÍ[À¤nullR³ExpressionStatementÍfÍzS´AssignmentExpressionÍfÍy¡=T°MemberExpressionÍfÍrU®ThisExpressionÍfÍjNªIdentifierÍkÍr§contextÂÂV§LiteralÍuÍyÀ¤nullR³ExpressionStatementÍ„Í£S´AssignmentExpressionÍ„Í¢¡=T°MemberExpressionÍ„ÍU®ThisExpressionÍ„ÍˆNªIdentifierÍ‰Í´localDeviceNetworkIdÂÂV§LiteralÍ Í¢ ¢''R³ExpressionStatementÍ­ÍÄS´AssignmentExpressionÍ­ÍÃ¡=T°MemberExpressionÍ­Í¹U®ThisExpressionÍ­Í±NªIdentifierÍ²Í¹§contextÂÂNªIdentifierÍ¼ÍÃ§contextP°MethodDefinitionÍÍ9ÂÂNªIdentifierÍÍ´setDistributedTables¦methodQ²FunctionExpressionÍÍ9ÀÂÂÃ‘NªIdentifierÍ Í'§contextO®BlockStatementÍ)Í9‘ÔrW–¤type¥start£end¥block§handler©finalizer¬TryStatementÍ4Í2O®BlockStatementÍ8Í¡“R³ExpressionStatementÍGÍ S´AssignmentExpressionÍGÍŸ¡=T°MemberExpressionÍGÍTU®ThisExpressionÍGÍKNªIdentifierÍLÍT¨rdbStoreÂÂÔrX”¤type¥start£end¨argument¯AwaitExpressionÍWÍŸÔrY–¤type¥start£end¦callee©arguments¨optional®CallExpressionÍ]ÍŸT°MemberExpressionÍ]ÍxNªIdentifierÍ]Íl¯relationalStoreNªIdentifierÍmÍx«getRdbStoreÂÂ’NªIdentifierÍyÍ€§contextT°MemberExpressionÍ‚ÍNªIdentifierÍ‚Í‘¯CommonConstantsNªIdentifierÍ’Í¬STORE_CONFIGÂÂÂR³ExpressionStatementÍ®ÍöX¯AwaitExpressionÍ®ÍõY®CallExpressionÍ´ÍõT°MemberExpressionÍ´ÍÌT°MemberExpressionÍ´ÍÁU®ThisExpressionÍ´Í¸NªIdentifierÍ¹ÍÁ¨rdbStoreÂÂNªIdentifierÍÂÍÌªexecuteSqlÂÂ‘T°MemberExpressionÍÍÍôT°MemberExpressionÍÍÍêNªIdentifierÍÍÍÜ¯CommonConstantsNªIdentifierÍİÍê­ACCOUNT_TABLEÂÂNªIdentifierÍëÍô©sqlCreateÂÂÂR³ExpressionStatementÍBÍ–X¯AwaitExpressionÍBÍ•Y®CallExpressionÍHÍ•T°MemberExpressionÍHÍjT°MemberExpressionÍHÍUU®ThisExpressionÍHÍLNªIdentifierÍMÍU¨rdbStoreÂÂNªIdentifierÍVÍj´setDistributedTablesÂÂ‘ÔrZ”¤type¥start£end¨elements¯ArrayExpressionÍkÍ”‘T°MemberExpressionÍlÍ“T°MemberExpressionÍlÍ‰NªIdentifierÍlÍ{¯CommonConstantsNªIdentifierÍ|Í‰­ACCOUNT_TABLEÂÂNªIdentifierÍŠÍ“©tableNameÂÂÂÔr[•¤type¥start£end¥param¤body«CatchClauseÍ«Í2NªIdentifierÍ²Í·¥errorO®BlockStatementÍ¹Í2‘R³ExpressionStatementÍÈÍ'Y®CallExpressionÍÈÍ&T°MemberExpressionÍÈÍÓNªIdentifierÍÈÍÍ¥hilogNªIdentifierÍÎÍÓ¥errorÂÂ“V§LiteralÍÔÍÚ ¦0x0000V§LiteralÍÜÍèªRdbManager¬'RdbManager'Ôr\•¤type¥start£end«expressions¦quasis¯TemplateLiteralÍêÍ%’T°MemberExpressionÍşÍNªIdentifierÍşÍ¥errorNªIdentifierÍÍ¤codeÂÂT°MemberExpressionÍÍ#NªIdentifierÍÍ¥errorNªIdentifierÍÍ#§messageÂÂ“Ôr]•¤type¥start£end¥value¤tail¯TemplateElementÍëÍüÔr^’£raw¦cooked±have error .Code:±have error .Code:Â]¯TemplateElementÍ	Í^«, message: «, message: Â]¯TemplateElementÍ$Í$^  ÃÂÀP°MethodDefinitionÍÍ	™ÂÂNªIdentifierÍÍ£³subscribeDataChange¦methodQ²FunctionExpressionÍ£Í	™ÀÂÂÂO®BlockStatementÍ¦Í	™‘Ôr_–¤type¥start£end¤testªconsequent©alternate«IfStatementÍ±Í	’T°MemberExpressionÍµÍÂU®ThisExpressionÍµÍ¹NªIdentifierÍºÍÂ¨rdbStoreÂÂO®BlockStatementÍÄÍ	’‘W¬TryStatementÍÓÍ	‡O®BlockStatementÍ×ÍÎ‘R³ExpressionStatementÍ¹Í¿Y®CallExpressionÍ¹Í¾T°MemberExpressionÍ¹ÍÉT°MemberExpressionÍ¹ÍÆU®ThisExpressionÍ¹Í½NªIdentifierÍ¾ÍÆ¨rdbStoreÂÂNªIdentifierÍÇÍÉ¢onÂÂ“V§LiteralÍÊÍÖªdataChange¬'dataChange'T°MemberExpressionÍØÍT°MemberExpressionÍØÍõNªIdentifierÍØÍç¯relationalStoreNªIdentifierÍèÍõ­SubscribeTypeÂÂNªIdentifierÍöÍµSUBSCRIBE_TYPE_REMOTEÂÂQ·ArrowFunctionExpressionÍÍ½ÀÂÂÃ‘NªIdentifierÍÍ§devicesO®BlockStatementÍ Í½’R³ExpressionStatementÍ7ÍY®CallExpressionÍ7ÍŒT°MemberExpressionÍ7ÍANªIdentifierÍ7Í<¥hilogNªIdentifierÍ=ÍA¤infoÂÂ”V§LiteralÍBÍH ¦0x0000V§LiteralÍJÍQ¥hilog§'hilog'T°MemberExpressionÍSÍjNªIdentifierÍSÍb¯CommonConstantsNªIdentifierÍcÍj§RDB_TAGÂÂÔr`–¤type¥start£end¤left¨operator¥right°BinaryExpressionÍlÍ‹V§LiteralÍlÍ³dataChange devices µ'dataChange devices '¡+NªIdentifierÍ„Í‹§devicesÂÔra—¤type¥start£end¤init¤test¦update¤body¬ForStatementÍ£ÍªÔrb•¤type¥start£end¬declarations¤kind³VariableDeclarationÍ¨Í±‘Ôrc•¤type¥start£end¢id¤init²VariableDeclaratorÍ¬Í±NªIdentifierÍ¬Í­¡iV§LiteralÍ°Í± ¡0£let`°BinaryExpressionÍ³ÍÅNªIdentifierÍ³Í´¡i¡<T°MemberExpressionÍ·ÍÅNªIdentifierÍ·Í¾§devicesNªIdentifierÍ¿ÍÅ¦lengthÂÂÔrd–¤type¥start£end¨operator¦prefix¨argument°UpdateExpressionÍÇÍÊ¢++ÂNªIdentifierÍÇÍÈ¡iO®BlockStatementÍÌÍª•b³VariableDeclarationÍçÍÿ‘c²VariableDeclaratorÍëÍşNªIdentifierÍëÍñ¦deviceT°MemberExpressionÍôÍşNªIdentifierÍôÍû§devicesNªIdentifierÍüÍı¡iÃÂ£let_«IfStatementÍÍnd¯UnaryExpressionÍÍ+¡!ÃT°MemberExpressionÍÍ+U®ThisExpressionÍÍ"NªIdentifierÍ#Í+¨rdbStoreÂÂO®BlockStatementÍ-Ín‘X¯ReturnStatementÍLÍSÀÀR³ExpressionStatementÍˆÍïY®CallExpressionÍˆÍîT°MemberExpressionÍˆÍ’NªIdentifierÍˆÍ¥hilogNªIdentifierÍÍ’¤infoÂÂ”V§LiteralÍ“Í™ ¦0x0000V§LiteralÍ›Í¢¥hilog§'hilog'T°MemberExpressionÍ¤Í»NªIdentifierÍ¤Í³¯CommonConstantsNªIdentifierÍ´Í»§RDB_TAGÂÂ\¯TemplateLiteralÍ½Íí‘NªIdentifierÍÓÍÙ¦device’]¯TemplateElementÍ¾ÍÑ^³The data of device:³The data of device:Â]¯TemplateElementÍÚÍì^² has been changed.² has been changed.ÃÂb³VariableDeclarationÍ	Í7‘c²VariableDeclaratorÍÍ6NªIdentifierÍÍ¦resultX¯AwaitExpressionÍÍ6Y®CallExpressionÍÍ6T°MemberExpressionÍÍ.U®ThisExpressionÍÍ"NªIdentifierÍ#Í.«remoteQueryÂÂ‘NªIdentifierÍ/Í5¦deviceÂ¥constR³ExpressionStatementÍQÍ“R¯ChainExpressionÍQÍ’Y®CallExpressionÍQÍ’T°MemberExpressionÍQÍlT°MemberExpressionÍQÍgT°MemberExpressionÍQÍ]U®ThisExpressionÍQÍUNªIdentifierÍVÍ]§contextÂÂNªIdentifierÍ_Íg¨eventHubÂÃNªIdentifierÍhÍl¤emitÂÂ’V§LiteralÍmÍyªdataChange¬'dataChange'Y®CallExpressionÍ{Í‘T°MemberExpressionÍ{Í‰NªIdentifierÍ{Í¤JSONNªIdentifierÍ€Í‰©stringifyÂÂ‘NªIdentifierÍŠÍ¦resultÂÂÂ[«CatchClauseÍÜÍ	‡NªIdentifierÍãÍæ£errO®BlockStatementÍèÍ	‡‘R³ExpressionStatementÍûÍ	xY®CallExpressionÍûÍ	wT°MemberExpressionÍûÍ	NªIdentifierÍûÍ	 ¥hilogNªIdentifierÍ	Í	¤infoÂÂ”V§LiteralÍ	Í	 ¦0x0000V§LiteralÍ	Í	¥hilog§'hilog'T°MemberExpressionÍ	Í	.NªIdentifierÍ	Í	&¯CommonConstantsNªIdentifierÍ	'Í	.§RDB_TAGÂÂ\¯TemplateLiteralÍ	0Í	v’T°MemberExpressionÍ	UÍ	]NªIdentifierÍ	UÍ	X£errNªIdentifierÍ	YÍ	]¤codeÂÂT°MemberExpressionÍ	iÍ	tNªIdentifierÍ	iÍ	l£errNªIdentifierÍ	mÍ	t§messageÂÂ“]¯TemplateElementÍ	1Í	S^Ù"Failed to register observer. Code:Ù"Failed to register observer. Code:Â]¯TemplateElementÍ	^Í	g^©,message:©,message:Â]¯TemplateElementÍ	uÍ	u^  ÃÂÀÀP°MethodDefinitionÍ	¼ÍÑÂÂNªIdentifierÍ	¼Í	Ó·getLocalDeviceNetworkId¦methodQ²FunctionExpressionÍ	ÓÍÑÀÂÂÂO®BlockStatementÍ	ÖÍÑ‘W¬TryStatementÍ	áÍÊO®BlockStatementÍ	åÍ!’b³VariableDeclarationÍ
+Í
+‹‘c²VariableDeclaratorÍ
+ Í
+ŠNªIdentifierÍ
+ Í
+-­deviceManagerY®CallExpressionÍ
+0Í
+ŠT°MemberExpressionÍ
+0Í
+\NªIdentifierÍ
+0Í
+H¸distributedDeviceManagerNªIdentifierÍ
+IÍ
+\³createDeviceManagerÂÂ‘V§LiteralÍ
+]Í
+‰Ù*com.example.crossDeviceDataSynchronizationÙ,'com.example.crossDeviceDataSynchronization'Â¥const_«IfStatementÍÍ`°BinaryExpressionÍ
+ÍNªIdentifierÍ
+Í­deviceManager¢!=V§LiteralÍÍÀ¤nullO®BlockStatementÍ!Í’R³ExpressionStatementÍ4ÍxS´AssignmentExpressionÍ4Íw¡=T°MemberExpressionÍ4ÍMU®ThisExpressionÍ4Í8NªIdentifierÍ9ÍM´localDeviceNetworkIdÂÂY®CallExpressionÍPÍwT°MemberExpressionÍPÍuNªIdentifierÍPÍ]­deviceManagerNªIdentifierÍ^Íu·getLocalDeviceNetworkIdÂÂÂR³ExpressionStatementÍŠÍY®CallExpressionÍŠÍT°MemberExpressionÍŠÍ”NªIdentifierÍŠÍ¥hilogNªIdentifierÍÍ”¤infoÂÂ”V§LiteralÍ•Í› ¦0x0000V§LiteralÍÍ¤¥hilog§'hilog'T°MemberExpressionÍ¦Í½NªIdentifierÍ¦Íµ¯CommonConstantsNªIdentifierÍ¶Í½§RDB_TAGÂÂ`°BinaryExpressionÍ¿ÍV§LiteralÍ¿ÍÙ¸local device networkId: º'local device networkId: '¡+Y®CallExpressionÍÜÍT°MemberExpressionÍÜÍêNªIdentifierÍÜÍà¤JSONNªIdentifierÍáÍê©stringifyÂÂ‘T°MemberExpressionÍëÍU®ThisExpressionÍëÍïNªIdentifierÍğÍ´localDeviceNetworkIdÂÂÂÂÀ[«CatchClauseÍ+ÍÊNªIdentifierÍ2Í5£errO®BlockStatementÍ7ÍÊ‘R³ExpressionStatementÍFÍ¿Y®CallExpressionÍFÍ¾T°MemberExpressionÍFÍQNªIdentifierÍFÍK¥hilogNªIdentifierÍLÍQ¥errorÂÂ”V§LiteralÍRÍX ¦0x0000V§LiteralÍZÍa¥hilog§'hilog'T°MemberExpressionÍcÍzNªIdentifierÍcÍr¯CommonConstantsNªIdentifierÍsÍz§RDB_TAGÂÂ\¯TemplateLiteralÍ|Í½’T°MemberExpressionÍ›Í£NªIdentifierÍ›Í£errNªIdentifierÍŸÍ£¤codeÂÂT°MemberExpressionÍ°Í»NªIdentifierÍ°Í³£errNªIdentifierÍ´Í»§messageÂÂ“]¯TemplateElementÍ}Í™^¼Failed to insert data. Code:¼Failed to insert data. Code:Â]¯TemplateElementÍ¤Í®^ª, message:ª, message:Â]¯TemplateElementÍ¼Í¼^  ÃÂÀP°MethodDefinitionÍÍ)ÂÂNªIdentifierÍÍ­getDeviceList¦methodQ²FunctionExpressionÍÍ)ÀÂÂÂO®BlockStatementÍÍ)”b³VariableDeclarationÍ(Í:‘c²VariableDeclaratorÍ,Í9NªIdentifierÍ,Í9­deviceManagerÀ£letb³VariableDeclarationÍDÍW‘c²VariableDeclaratorÍHÍVNªIdentifierÍHÍQ©deviceIdsZ¯ArrayExpressionÍTÍV£letW¬TryStatementÍaÍO®BlockStatementÍeÍ^’R³ExpressionStatementÍšÍS´AssignmentExpressionÍšÍ¡=NªIdentifierÍšÍ§­deviceManagerY®CallExpressionÍªÍT°MemberExpressionÍªÍÖNªIdentifierÍªÍÂ¸distributedDeviceManagerNªIdentifierÍÃÍÖ³createDeviceManagerÂÂ‘V§LiteralÍ×ÍÙ*com.example.crossDeviceDataSynchronizationÙ,'com.example.crossDeviceDataSynchronization'Â_«IfStatementÍ€ÍS`°BinaryExpressionÍ„Í™NªIdentifierÍ„Í‘­deviceManager¢!=V§LiteralÍ•Í™À¤nullO®BlockStatementÍ›ÍS“b³VariableDeclarationÍ®Íç‘c²VariableDeclaratorÍ²ÍæNªIdentifierÍ²Í¹§devicesY®CallExpressionÍ¼ÍæT°MemberExpressionÍ¼ÍäNªIdentifierÍ¼ÍÉ­deviceManagerNªIdentifierÍÊÍäºgetAvailableDeviceListSyncÂÂÂ£letR³ExpressionStatementÍùÍPY®CallExpressionÍùÍOT°MemberExpressionÍùÍNªIdentifierÍùÍş¥hilogNªIdentifierÍÿÍ¤infoÂÂ”V§LiteralÍÍ
+ ¦0x0000V§LiteralÍÍ¥hilog§'hilog'T°MemberExpressionÍÍ,NªIdentifierÍÍ$¯CommonConstantsNªIdentifierÍ%Í,§RDB_TAGÂÂ`°BinaryExpressionÍ.ÍNV§LiteralÍ.Í=­devices size ¯'devices size '¡+T°MemberExpressionÍ@ÍNNªIdentifierÍ@ÍG§devicesNªIdentifierÍHÍN¦lengthÂÂÂa¬ForStatementÍbÍDb³VariableDeclarationÍgÍp‘c²VariableDeclaratorÍkÍpNªIdentifierÍkÍl¡iV§LiteralÍoÍp ¡0£let`°BinaryExpressionÍrÍ„NªIdentifierÍrÍs¡i¡<T°MemberExpressionÍvÍ„NªIdentifierÍvÍ}§devicesNªIdentifierÍ~Í„¦lengthÂÂd°UpdateExpressionÍ†Í‰¢++ÂNªIdentifierÍ†Í‡¡iO®BlockStatementÍ‹ÍD’R³ExpressionStatementÍ¢ÍÆS´AssignmentExpressionÍ¢ÍÅ¡=T°MemberExpressionÍ¢Í®NªIdentifierÍ¢Í«©deviceIdsNªIdentifierÍ¬Í­¡iÃÂT°MemberExpressionÍ±ÍÅT°MemberExpressionÍ±Í»NªIdentifierÍ±Í¸§devicesNªIdentifierÍ¹Íº¡iÃÂNªIdentifierÍ¼ÍÅ©networkIdÂÂR³ExpressionStatementÍÜÍ1Y®CallExpressionÍÜÍ0T°MemberExpressionÍÜÍæNªIdentifierÍÜÍá¥hilogNªIdentifierÍâÍæ¤infoÂÂ”V§LiteralÍçÍí ¦0x0000V§LiteralÍïÍö¥hilog§'hilog'T°MemberExpressionÍøÍNªIdentifierÍøÍ¯CommonConstantsNªIdentifierÍÍ§RDB_TAGÂÂ`°BinaryExpressionÍÍ/V§LiteralÍÍ ­devices size ¯'devices size '¡+T°MemberExpressionÍ#Í/NªIdentifierÍ#Í,©deviceIdsNªIdentifierÍ-Í.¡iÃÂÂÀ[«CatchClauseÍhÍNªIdentifierÍoÍr£errO®BlockStatementÍtÍ‘R³ExpressionStatementÍƒÍüY®CallExpressionÍƒÍûT°MemberExpressionÍƒÍNªIdentifierÍƒÍˆ¥hilogNªIdentifierÍ‰Í¥errorÂÂ”V§LiteralÍÍ• ¦0x0000V§LiteralÍ—Í¥hilog§'hilog'T°MemberExpressionÍ Í·NªIdentifierÍ Í¯¯CommonConstantsNªIdentifierÍ°Í·§RDB_TAGÂÂ\¯TemplateLiteralÍ¹Íú’T°MemberExpressionÍØÍàNªIdentifierÍØÍÛ£errNªIdentifierÍÜÍà¤codeÂÂT°MemberExpressionÍíÍøNªIdentifierÍíÍğ£errNªIdentifierÍñÍø§messageÂÂ“]¯TemplateElementÍºÍÖ^¼Failed to insert data. Code:¼Failed to insert data. Code:Â]¯TemplateElementÍáÍë^ª, message:ª, message:Â]¯TemplateElementÍùÍù^  ÃÂÀX¯ReturnStatementÍÍ"NªIdentifierÍÍ!©deviceIdsP°MethodDefinitionÍ¡ÍzÂÂNªIdentifierÍ§Í±ªinsertData¦methodQ²FunctionExpressionÍ±ÍzÀÂÂÃ’NªIdentifierÍ²Í¶¤dataÔre•¤type¥start£end¤left¥right±AssignmentPatternÍ¸ÍÅNªIdentifierÍ¸Í¾¦isSyncV§LiteralÍÁÍÅÃ¤trueO®BlockStatementÍÇÍz”b³VariableDeclarationÍÒÍÿ‘c²VariableDeclaratorÍØÍşNªIdentifierÍØÍâªinsertDataY®CallExpressionÍåÍşT°MemberExpressionÍåÍøU®ThisExpressionÍåÍéNªIdentifierÍêÍø®generateBucketÂÂ‘NªIdentifierÍùÍı¤dataÂ¥constb³VariableDeclarationÍ	Í‘c²VariableDeclaratorÍÍNªIdentifierÍÍ¥rowIdd¯UnaryExpressionÍÍ¡-ÃV§LiteralÍÍ¡1£let_«IfStatementÍ"Í\T°MemberExpressionÍ&Í3U®ThisExpressionÍ&Í*NªIdentifierÍ+Í3¨rdbStoreÂÂO®BlockStatementÍ5Í\‘W¬TryStatementÍDÍQO®BlockStatementÍHÍ–“R³ExpressionStatementÍ[Í³S´AssignmentExpressionÍ[Í²¡=NªIdentifierÍ[Í`¥rowIdX¯AwaitExpressionÍcÍ²Y®CallExpressionÍiÍ²T°MemberExpressionÍiÍ}T°MemberExpressionÍiÍvU®ThisExpressionÍiÍmNªIdentifierÍnÍv¨rdbStoreÂÂNªIdentifierÍwÍ}¦insertÂÂ’T°MemberExpressionÍ~Í¥T°MemberExpressionÍ~Í›NªIdentifierÍ~Í¯CommonConstantsNªIdentifierÍÍ›­ACCOUNT_TABLEÂÂNªIdentifierÍœÍ¥©tableNameÂÂNªIdentifierÍ§Í±ªinsertDataÂ_«IfStatementÍÅÍNªIdentifierÍÉÍÏ¦isSyncO®BlockStatementÍÑÍ‘R³ExpressionStatementÍèÍşX¯AwaitExpressionÍèÍıY®CallExpressionÍîÍıT°MemberExpressionÍîÍûU®ThisExpressionÍîÍòNªIdentifierÍóÍû¨syncDataÂÂÂÀR³ExpressionStatementÍ#Í‡Y®CallExpressionÍ#Í†T°MemberExpressionÍ#Í-NªIdentifierÍ#Í(¥hilogNªIdentifierÍ)Í-¤infoÂÂ”V§LiteralÍ.Í4 ¦0x0000V§LiteralÍ6Í=¥hilog§'hilog'T°MemberExpressionÍ?ÍVNªIdentifierÍ?ÍN¯CommonConstantsNªIdentifierÍOÍV§RDB_TAGÂÂ\¯TemplateLiteralÍXÍ…‘NªIdentifierÍ~Íƒ¥rowId’]¯TemplateElementÍYÍ|^Ù#Succeeded in inserting data. rowId:Ù#Succeeded in inserting data. rowId:Â]¯TemplateElementÍ„Í„^  ÃÂ[«CatchClauseÍ¤ÍQNªIdentifierÍ«Í°¥errorO®BlockStatementÍ²ÍQ‘R³ExpressionStatementÍÅÍBY®CallExpressionÍÅÍAT°MemberExpressionÍÅÍĞNªIdentifierÍÅÍÊ¥hilogNªIdentifierÍËÍĞ¥errorÂÂ”V§LiteralÍÑÍ× ¦0x0000V§LiteralÍÙÍà¥hilog§'hilog'T°MemberExpressionÍâÍùNªIdentifierÍâÍñ¯CommonConstantsNªIdentifierÍòÍù§RDB_TAGÂÂ\¯TemplateLiteralÍûÍ@’T°MemberExpressionÍÍ$NªIdentifierÍÍ¥errorNªIdentifierÍ Í$¤codeÂÂT°MemberExpressionÍ1Í>NªIdentifierÍ1Í6¥errorNªIdentifierÍ7Í>§messageÂÂ“]¯TemplateElementÍüÍ^¼Failed to insert data. Code:¼Failed to insert data. Code:Â]¯TemplateElementÍ%Í/^ª, message:ª, message:Â]¯TemplateElementÍ?Í?^  ÃÂÀÀX¯ReturnStatementÍfÍsNªIdentifierÍmÍr¥rowIdP°MethodDefinitionÍôÍÂÂNªIdentifierÍúÍªdeleteData¦methodQ²FunctionExpressionÍÍÀÂÂÃ’NªIdentifierÍÍ	¤datae±AssignmentPatternÍÍNªIdentifierÍÍ¦isSyncV§LiteralÍÍÃ¤trueO®BlockStatementÍÍ“b³VariableDeclarationÍ%Í2‘c²VariableDeclaratorÍ)Í1NªIdentifierÍ)Í-¤rowsV§LiteralÍ0Í1 ¡0£let_«IfStatementÍ<ÍéT°MemberExpressionÍ@ÍMU®ThisExpressionÍ@ÍDNªIdentifierÍEÍM¨rdbStoreÂÂO®BlockStatementÍOÍé‘W¬TryStatementÍ^ÍŞO®BlockStatementÍbÍ#•b³VariableDeclarationÍuÍÑ‘c²VariableDeclaratorÍyÍĞNªIdentifierÍyÍƒªpredicatesÔrf•¤type¥start£end¦callee©arguments­NewExpressionÍ†ÍĞT°MemberExpressionÍŠÍ§NªIdentifierÍŠÍ™¯relationalStoreNªIdentifierÍšÍ§­RdbPredicatesÂÂ‘T°MemberExpressionÍ¨ÍÏT°MemberExpressionÍ¨ÍÅNªIdentifierÍ¨Í·¯CommonConstantsNªIdentifierÍ¸ÍÅ­ACCOUNT_TABLEÂÂNªIdentifierÍÆÍÏ©tableNameÂÂ£letR³ExpressionStatementÍãÍY®CallExpressionÍãÍT°MemberExpressionÍãÍõNªIdentifierÍãÍíªpredicatesNªIdentifierÍîÍõ§equalToÂÂ’V§LiteralÍöÍú¢id¤'id'T°MemberExpressionÍüÍNªIdentifierÍüÍ ¤dataNªIdentifierÍÍ¢idÂÂÂR³ExpressionStatementÍÍES´AssignmentExpressionÍÍD¡=NªIdentifierÍÍ¤rowsX¯AwaitExpressionÍÍDY®CallExpressionÍ$ÍDT°MemberExpressionÍ$Í8T°MemberExpressionÍ$Í1U®ThisExpressionÍ$Í(NªIdentifierÍ)Í1¨rdbStoreÂÂNªIdentifierÍ2Í8¦deleteÂÂ‘NªIdentifierÍ9ÍCªpredicatesÂ_«IfStatementÍWÍ£NªIdentifierÍ[Ía¦isSyncO®BlockStatementÍcÍ£‘R³ExpressionStatementÍzÍX¯AwaitExpressionÍzÍY®CallExpressionÍ€ÍT°MemberExpressionÍ€ÍU®ThisExpressionÍ€Í„NªIdentifierÍ…Í¨syncDataÂÂÂÀR³ExpressionStatementÍµÍY®CallExpressionÍµÍT°MemberExpressionÍµÍ¿NªIdentifierÍµÍº¥hilogNªIdentifierÍ»Í¿¤infoÂÂ”V§LiteralÍÀÍÆ ¦0x0000V§LiteralÍÈÍÏ¥hilog§'hilog'T°MemberExpressionÍÑÍèNªIdentifierÍÑÍà¯CommonConstantsNªIdentifierÍáÍè§RDB_TAGÂÂ\¯TemplateLiteralÍêÍ‘NªIdentifierÍÍ¤rows’]¯TemplateElementÍëÍ
+^¿Succeeded in delete data. rows:¿Succeeded in delete data. rows:Â]¯TemplateElementÍÍ^  ÃÂ[«CatchClauseÍ1ÍŞNªIdentifierÍ8Í=¥errorO®BlockStatementÍ?ÍŞ‘R³ExpressionStatementÍRÍÏY®CallExpressionÍRÍÎT°MemberExpressionÍRÍ]NªIdentifierÍRÍW¥hilogNªIdentifierÍXÍ]¥errorÂÂ”V§LiteralÍ^Íd ¦0x0000V§LiteralÍfÍm¥hilog§'hilog'T°MemberExpressionÍoÍ†NªIdentifierÍoÍ~¯CommonConstantsNªIdentifierÍÍ†§RDB_TAGÂÂ\¯TemplateLiteralÍˆÍÍ’T°MemberExpressionÍ§Í±NªIdentifierÍ§Í¬¥errorNªIdentifierÍ­Í±¤codeÂÂT°MemberExpressionÍ¾ÍËNªIdentifierÍ¾ÍÃ¥errorNªIdentifierÍÄÍË§messageÂÂ“]¯TemplateElementÍ‰Í¥^¼Failed to delete data. Code:¼Failed to delete data. Code:Â]¯TemplateElementÍ²Í¼^ª, message:ª, message:Â]¯TemplateElementÍÌÍÌ^  ÃÂÀÀX¯ReturnStatementÍóÍÿNªIdentifierÍúÍş¤rowsP°MethodDefinitionÍ€Í×ÂÂNªIdentifierÍ†ÍªupdateData¦methodQ²FunctionExpressionÍÍ×ÀÂÂÃ’NªIdentifierÍ‘Í•¤datae±AssignmentPatternÍ—Í¤NªIdentifierÍ—Í¦isSyncV§LiteralÍ Í¤Ã¤trueO®BlockStatementÍ¦Í×”b³VariableDeclarationÍ±Íß‘c²VariableDeclaratorÍ·ÍŞNªIdentifierÍ·ÍÂ«valueBucketY®CallExpressionÍÅÍŞT°MemberExpressionÍÅÍØU®ThisExpressionÍÅÍÉNªIdentifierÍÊÍØ®generateBucketÂÂ‘NªIdentifierÍÙÍİ¤dataÂ¥constb³VariableDeclarationÍéÍö‘c²VariableDeclaratorÍíÍõNªIdentifierÍíÍñ¤rowsV§LiteralÍôÍõ ¡0£let_«IfStatementÍ ÍºT°MemberExpressionÍÍU®ThisExpressionÍÍNªIdentifierÍ	Í¨rdbStoreÂÂO®BlockStatementÍÍº‘W¬TryStatementÍ"Í¯O®BlockStatementÍ&Íô•b³VariableDeclarationÍ9Í•‘c²VariableDeclaratorÍ=Í”NªIdentifierÍ=ÍGªpredicatesf­NewExpressionÍJÍ”T°MemberExpressionÍNÍkNªIdentifierÍNÍ]¯relationalStoreNªIdentifierÍ^Ík­RdbPredicatesÂÂ‘T°MemberExpressionÍlÍ“T°MemberExpressionÍlÍ‰NªIdentifierÍlÍ{¯CommonConstantsNªIdentifierÍ|Í‰­ACCOUNT_TABLEÂÂNªIdentifierÍŠÍ“©tableNameÂÂ£letR³ExpressionStatementÍ§ÍÉY®CallExpressionÍ§ÍÈT°MemberExpressionÍ§Í¹NªIdentifierÍ§Í±ªpredicatesNªIdentifierÍ²Í¹§equalToÂÂ’V§LiteralÍºÍ¾¢id¤'id'T°MemberExpressionÍÀÍÇNªIdentifierÍÀÍÄ¤dataNªIdentifierÍÅÍÇ¢idÂÂÂR³ExpressionStatementÍÛÍS´AssignmentExpressionÍÛÍ¡=NªIdentifierÍÛÍß¤rowsX¯AwaitExpressionÍâÍY®CallExpressionÍèÍT°MemberExpressionÍèÍüT°MemberExpressionÍèÍõU®ThisExpressionÍèÍìNªIdentifierÍíÍõ¨rdbStoreÂÂNªIdentifierÍöÍü¦updateÂÂ’NªIdentifierÍıÍ«valueBucketNªIdentifierÍ
+ÍªpredicatesÂ_«IfStatementÍ(ÍtNªIdentifierÍ,Í2¦isSyncO®BlockStatementÍ4Ít‘R³ExpressionStatementÍKÍaX¯AwaitExpressionÍKÍ`Y®CallExpressionÍQÍ`T°MemberExpressionÍQÍ^U®ThisExpressionÍQÍUNªIdentifierÍVÍ^¨syncDataÂÂÂÀR³ExpressionStatementÍ†ÍåY®CallExpressionÍ†ÍäT°MemberExpressionÍ†ÍNªIdentifierÍ†Í‹¥hilogNªIdentifierÍŒÍ¤infoÂÂ”V§LiteralÍ‘Í— ¦0x0000V§LiteralÍ™Í ¥hilog§'hilog'T°MemberExpressionÍ¢Í¹NªIdentifierÍ¢Í±¯CommonConstantsNªIdentifierÍ²Í¹§RDB_TAGÂÂ\¯TemplateLiteralÍ»Íã‘NªIdentifierÍİÍá¤rows’]¯TemplateElementÍ¼ÍÛ^¿Succeeded in update data. rows:¿Succeeded in update data. rows:Â]¯TemplateElementÍâÍâ^  ÃÂ[«CatchClauseÍÍ¯NªIdentifierÍ	Í¥errorO®BlockStatementÍÍ¯‘R³ExpressionStatementÍ#Í Y®CallExpressionÍ#ÍŸT°MemberExpressionÍ#Í.NªIdentifierÍ#Í(¥hilogNªIdentifierÍ)Í.¥errorÂÂ”V§LiteralÍ/Í5 ¦0x0000V§LiteralÍ7Í>¥hilog§'hilog'T°MemberExpressionÍ@ÍWNªIdentifierÍ@ÍO¯CommonConstantsNªIdentifierÍPÍW§RDB_TAGÂÂ\¯TemplateLiteralÍYÍ’T°MemberExpressionÍxÍ‚NªIdentifierÍxÍ}¥errorNªIdentifierÍ~Í‚¤codeÂÂT°MemberExpressionÍÍœNªIdentifierÍÍ”¥errorNªIdentifierÍ•Íœ§messageÂÂ“]¯TemplateElementÍZÍv^¼Failed to update data. Code:¼Failed to update data. Code:Â]¯TemplateElementÍƒÍ^ª, message:ª, message:Â]¯TemplateElementÍÍ^  ÃÂÀÀX¯ReturnStatementÍÄÍĞNªIdentifierÍËÍÏ¤rowsP°MethodDefinitionÍlÍ :ÂÂNªIdentifierÍrÍw¥query¦methodQ²FunctionExpressionÍwÍ :ÀÂÂÃ’NªIdentifierÍxÍƒ«searchValuee±AssignmentPatternÍ…Í‘NªIdentifierÍ…ÍŠ¥isAllV§LiteralÍÍ‘Ã¤trueO®BlockStatementÍ“Í :“b³VariableDeclarationÍÍ®‘c²VariableDeclaratorÍ¢Í­NªIdentifierÍ¢Í¨¦resultZ¯ArrayExpressionÍ«Í­£let_«IfStatementÍ¸Í T°MemberExpressionÍ¼ÍÉU®ThisExpressionÍ¼ÍÀNªIdentifierÍÁÍÉ¨rdbStoreÂÂO®BlockStatementÍËÍ ‘W¬TryStatementÍÚÍ O®BlockStatementÍŞÍV–b³VariableDeclarationÍñÍM‘c²VariableDeclaratorÍõÍLNªIdentifierÍõÍÿªpredicatesf­NewExpressionÍÍLT°MemberExpressionÍÍ#NªIdentifierÍÍ¯relationalStoreNªIdentifierÍÍ#­RdbPredicatesÂÂ‘T°MemberExpressionÍ$ÍKT°MemberExpressionÍ$ÍANªIdentifierÍ$Í3¯CommonConstantsNªIdentifierÍ4ÍA­ACCOUNT_TABLEÂÂNªIdentifierÍBÍK©tableNameÂÂ£let_«IfStatementÍ_ÍÁd¯UnaryExpressionÍcÍi¡!ÃNªIdentifierÍdÍi¥isAllO®BlockStatementÍkÍÁ‘R³ExpressionStatementÍ‚Í®Y®CallExpressionÍ‚Í­T°MemberExpressionÍ‚Í”NªIdentifierÍ‚ÍŒªpredicatesNªIdentifierÍÍ”§equalToÂÂ’V§LiteralÍ•ÍŸ¨typeTextª'typeText'NªIdentifierÍ¡Í¬«searchValueÂÀb³VariableDeclarationÍÓÍ2‘c²VariableDeclaratorÍÙÍ1NªIdentifierÍÙÍâ©resultSetX¯AwaitExpressionÍåÍ1Y®CallExpressionÍëÍ1T°MemberExpressionÍëÍşT°MemberExpressionÍëÍøU®ThisExpressionÍëÍïNªIdentifierÍğÍø¨rdbStoreÂÂNªIdentifierÍùÍş¥queryÂÂ’NªIdentifierÍÿÍ	ªpredicatesT°MemberExpressionÍÍ0T°MemberExpressionÍÍ(NªIdentifierÍÍ¯CommonConstantsNªIdentifierÍÍ(­ACCOUNT_TABLEÂÂNªIdentifierÍ)Í0§columnsÂÂÂ¥constR³ExpressionStatementÍDÍhS´AssignmentExpressionÍDÍg¡=NªIdentifierÍDÍJ¦resultY®CallExpressionÍMÍgT°MemberExpressionÍMÍ\U®ThisExpressionÍMÍQNªIdentifierÍRÍ\ªformatDataÂÂ‘NªIdentifierÍ]Íf©resultSetÂR³ExpressionStatementÍzÍâY®CallExpressionÍzÍáT°MemberExpressionÍzÍ„NªIdentifierÍzÍ¥hilogNªIdentifierÍ€Í„¤infoÂÂ”V§LiteralÍ…Í‹ ¦0x0000V§LiteralÍÍ”¥hilog§'hilog'T°MemberExpressionÍ–Í­NªIdentifierÍ–Í¥¯CommonConstantsNªIdentifierÍ¦Í­§RDB_TAGÂÂ\¯TemplateLiteralÍ¯Íà‘NªIdentifierÍÕÍŞ©resultSet’]¯TemplateElementÍ°ÍÓ^Ù#Succeeded in query data. resultSet:Ù#Succeeded in query data. resultSet:Â]¯TemplateElementÍßÍß^  ÃÂ_«IfStatementÍôÍG`°BinaryExpressionÍøÍ	T°MemberExpressionÍøÍNªIdentifierÍøÍş¦resultNªIdentifierÍÿÍ¦lengthÂÂ¡>V§LiteralÍÍ	 ¡0O®BlockStatementÍÍG‘R³ExpressionStatementÍ"Í4Y®CallExpressionÍ"Í3T°MemberExpressionÍ"Í1NªIdentifierÍ"Í+©resultSetNªIdentifierÍ,Í1¥closeÂÂÂÀ[«CatchClauseÍdÍ NªIdentifierÍkÍp¥errorO®BlockStatementÍrÍ ‘R³ExpressionStatementÍ…Í Y®CallExpressionÍ…Í  T°MemberExpressionÍ…ÍNªIdentifierÍ…ÍŠ¥hilogNªIdentifierÍ‹Í¥errorÂÂ”V§LiteralÍ‘Í— ¦0x0000V§LiteralÍ™Í ¥hilog§'hilog'T°MemberExpressionÍ¢Í¹NªIdentifierÍ¢Í±¯CommonConstantsNªIdentifierÍ²Í¹§RDB_TAGÂÂ\¯TemplateLiteralÍ»Íÿ’T°MemberExpressionÍÙÍãNªIdentifierÍÙÍŞ¥errorNªIdentifierÍßÍã¤codeÂÂT°MemberExpressionÍğÍıNªIdentifierÍğÍõ¥errorNªIdentifierÍöÍı§messageÂÂ“]¯TemplateElementÍ¼Í×^»Failed to query data. Code:»Failed to query data. Code:Â]¯TemplateElementÍäÍî^ª, message:ª, message:Â]¯TemplateElementÍşÍş^  ÃÂÀÀX¯ReturnStatementÍ %Í 3NªIdentifierÍ ,Í 2¦resultP°MethodDefinitionÍ ZÍ&xÂÂNªIdentifierÍ `Í h¨syncData¦methodQ²FunctionExpressionÍ hÍ&xÀÂÂÃO®BlockStatementÍ kÍ&x‘_«IfStatementÍ vÍ&qT°MemberExpressionÍ zÍ ‡U®ThisExpressionÍ zÍ ~NªIdentifierÍ Í ‡¨rdbStoreÂÂO®BlockStatementÍ ‰Í&q•b³VariableDeclarationÍ ˜Í ¿‘c²VariableDeclaratorÍ Í ¾NªIdentifierÍ Í §©deviceIdsY®CallExpressionÍ ªÍ ¾T°MemberExpressionÍ ªÍ ¼U®ThisExpressionÍ ªÍ ®NªIdentifierÍ ¯Í ¼­getDeviceListÂÂÂ¥const_«IfStatementÍ ÍÍ!`°BinaryExpressionÍ ÑÍ çT°MemberExpressionÍ ÑÍ áNªIdentifierÍ ÑÍ Ú©deviceIdsNªIdentifierÍ ÛÍ á¦lengthÂÂ£===V§LiteralÍ æÍ ç ¡0O®BlockStatementÍ éÍ!‘X¯ReturnStatementÍ üÍ!ÀÀb³VariableDeclarationÍ!rÍ!Ğ‘c²VariableDeclaratorÍ!xÍ!ÏNªIdentifierÍ!xÍ!‚ªpredicatesf­NewExpressionÍ!…Í!ÏT°MemberExpressionÍ!‰Í!¦NªIdentifierÍ!‰Í!˜¯relationalStoreNªIdentifierÍ!™Í!¦­RdbPredicatesÂÂ‘T°MemberExpressionÍ!§Í!ÎT°MemberExpressionÍ!§Í!ÄNªIdentifierÍ!§Í!¶¯CommonConstantsNªIdentifierÍ!·Í!Ä­ACCOUNT_TABLEÂÂNªIdentifierÍ!ÅÍ!Î©tableNameÂÂ¥constR³ExpressionStatementÍ"Í":Y®CallExpressionÍ"Í"9T°MemberExpressionÍ"Í".NªIdentifierÍ"Í"$ªpredicatesNªIdentifierÍ"%Í".©inDevicesÂÂ‘NªIdentifierÍ"/Í"8©deviceIdsÂW¬TryStatementÍ"HÍ&fO®BlockStatementÍ"LÍ%¯’b³VariableDeclarationÍ"æÍ#C‘c²VariableDeclaratorÍ"ìÍ#BNªIdentifierÍ"ìÍ"ò¦resultX¯AwaitExpressionÍ"õÍ#BY®CallExpressionÍ"ûÍ#BT°MemberExpressionÍ"ûÍ#T°MemberExpressionÍ"ûÍ#U®ThisExpressionÍ"ûÍ"ÿNªIdentifierÍ# Í#¨rdbStoreÂÂNªIdentifierÍ#	Í#¤syncÂÂ’T°MemberExpressionÍ#Í#5T°MemberExpressionÍ#Í#&NªIdentifierÍ#Í#¯relationalStoreNªIdentifierÍ#Í#&¨SyncModeÂÂNªIdentifierÍ#'Í#5®SYNC_MODE_PUSHÂÂNªIdentifierÍ#7Í#AªpredicatesÂ¥consta¬ForStatementÍ#‰Í% b³VariableDeclarationÍ#Í#—‘c²VariableDeclaratorÍ#’Í#—NªIdentifierÍ#’Í#“¡iV§LiteralÍ#–Í#— ¡0£let`°BinaryExpressionÍ#™Í#ªNªIdentifierÍ#™Í#š¡i¡<T°MemberExpressionÍ#Í#ªNªIdentifierÍ#Í#£¦resultNªIdentifierÍ#¤Í#ª¦lengthÂÂd°UpdateExpressionÍ#¬Í#¯¢++ÂNªIdentifierÍ#¬Í#­¡iO®BlockStatementÍ#±Í% “b³VariableDeclarationÍ#ÈÍ#æ‘c²VariableDeclaratorÍ#ÎÍ#åNªIdentifierÍ#ÎÍ#Ö¨deviceIdT°MemberExpressionÍ#ÙÍ#åT°MemberExpressionÍ#ÙÍ#âNªIdentifierÍ#ÙÍ#ß¦resultNªIdentifierÍ#àÍ#á¡iÃÂV§LiteralÍ#ãÍ#ä ¡0ÃÂ¥constb³VariableDeclarationÍ#üÍ$‘c²VariableDeclaratorÍ$Í$NªIdentifierÍ$Í$ªsyncResultT°MemberExpressionÍ$Í$T°MemberExpressionÍ$Í$NªIdentifierÍ$Í$¦resultNªIdentifierÍ$Í$¡iÃÂV§LiteralÍ$Í$¡1ÃÂ¥const_«IfStatementÍ$2Í%`°BinaryExpressionÍ$6Í$FNªIdentifierÍ$6Í$@ªsyncResult£===V§LiteralÍ$EÍ$F ¡0O®BlockStatementÍ$HÍ$Ò‘R³ExpressionStatementÍ$cÍ$»Y®CallExpressionÍ$cÍ$ºT°MemberExpressionÍ$cÍ$mNªIdentifierÍ$cÍ$h¥hilogNªIdentifierÍ$iÍ$m¤infoÂÂ”V§LiteralÍ$nÍ$t ¦0x0000V§LiteralÍ$vÍ$}¥hilog§'hilog'T°MemberExpressionÍ$Í$–NªIdentifierÍ$Í$¯CommonConstantsNªIdentifierÍ$Í$–§RDB_TAGÂÂ\¯TemplateLiteralÍ$˜Í$¹‘NªIdentifierÍ$¢Í$ª¨deviceId’]¯TemplateElementÍ$™Í$ ^§device:§device:Â]¯TemplateElementÍ$«Í$¸^­ sync success­ sync successÃÂO®BlockStatementÍ$íÍ%‘R³ExpressionStatementÍ%Í%vY®CallExpressionÍ%Í%uT°MemberExpressionÍ%Í%NªIdentifierÍ%Í%¥hilogNªIdentifierÍ%Í%¥errorÂÂ”V§LiteralÍ%Í% ¦0x0000V§LiteralÍ%Í%#¥hilog§'hilog'T°MemberExpressionÍ%%Í%<NªIdentifierÍ%%Í%4¯CommonConstantsNªIdentifierÍ%5Í%<§RDB_TAGÂÂ\¯TemplateLiteralÍ%>Í%t’NªIdentifierÍ%HÍ%P¨deviceIdNªIdentifierÍ%hÍ%rªsyncResult“]¯TemplateElementÍ%?Í%F^§device:§device:Â]¯TemplateElementÍ%QÍ%f^µ sync failed, status:µ sync failed, status:Â]¯TemplateElementÍ%sÍ%s^  ÃÂ[«CatchClauseÍ%½Í&fNªIdentifierÍ%ÄÍ%Ç£errO®BlockStatementÍ%ÉÍ&f‘R³ExpressionStatementÍ%ÜÍ&WY®CallExpressionÍ%ÜÍ&VT°MemberExpressionÍ%ÜÍ%çNªIdentifierÍ%ÜÍ%á¥hilogNªIdentifierÍ%âÍ%ç¥errorÂÂ”V§LiteralÍ%èÍ%î ¦0x0000V§LiteralÍ%ğÍ%÷¥hilog§'hilog'T°MemberExpressionÍ%ùÍ&NªIdentifierÍ%ùÍ&¯CommonConstantsNªIdentifierÍ&	Í&§RDB_TAGÂÂ`°BinaryExpressionÍ&Í&U`°BinaryExpressionÍ&Í&G`°BinaryExpressionÍ&Í&7V§LiteralÍ&Í&,¸Push data failed, code: º'Push data failed, code: '¡+T°MemberExpressionÍ&/Í&7NªIdentifierÍ&/Í&2£errNªIdentifierÍ&3Í&7¤codeÂÂ¡+V§LiteralÍ&:Í&G«, message: ­', message: '¡+T°MemberExpressionÍ&JÍ&UNªIdentifierÍ&JÍ&M£errNªIdentifierÍ&NÍ&U§messageÂÂÂÀÀP°MethodDefinitionÍ&õÍ+øÂÂNªIdentifierÍ&ûÍ'«remoteQuery¦methodQ²FunctionExpressionÍ'Í+øÀÂÂÃ‘NªIdentifierÍ'Í'¦deviceO®BlockStatementÍ'Í+ø“b³VariableDeclarationÍ'Í'(‘c²VariableDeclaratorÍ'Í''NªIdentifierÍ'Í'"¤listZ¯ArrayExpressionÍ'%Í''£let_«IfStatementÍ'2Í+ÛT°MemberExpressionÍ'6Í'CU®ThisExpressionÍ'6Í':NªIdentifierÍ';Í'C¨rdbStoreÂÂO®BlockStatementÍ'EÍ+Û’b³VariableDeclarationÍ'äÍ(B‘c²VariableDeclaratorÍ'êÍ(ANªIdentifierÍ'êÍ'ôªpredicatesf­NewExpressionÍ'÷Í(AT°MemberExpressionÍ'ûÍ(NªIdentifierÍ'ûÍ(
+¯relationalStoreNªIdentifierÍ(Í(­RdbPredicatesÂÂ‘T°MemberExpressionÍ(Í(@T°MemberExpressionÍ(Í(6NªIdentifierÍ(Í((¯CommonConstantsNªIdentifierÍ()Í(6­ACCOUNT_TABLEÂÂNªIdentifierÍ(7Í(@©tableNameÂÂ¥constW¬TryStatementÍ(PÍ+ĞO®BlockStatementÍ(TÍ+•b³VariableDeclarationÍ(·Í)M‘c²VariableDeclaratorÍ(½Í)LNªIdentifierÍ(½Í(Æ©resultSetX¯AwaitExpressionÍ(ÉÍ)LY®CallExpressionÍ(ÏÍ)LT°MemberExpressionÍ(ÏÍ(èT°MemberExpressionÍ(ÏÍ(ÜU®ThisExpressionÍ(ÏÍ(ÓNªIdentifierÍ(ÔÍ(Ü¨rdbStoreÂÂNªIdentifierÍ(İÍ(è«remoteQueryÂÂ”NªIdentifierÍ(éÍ(ï¦deviceT°MemberExpressionÍ(ñÍ)T°MemberExpressionÍ(ñÍ)NªIdentifierÍ(ñÍ) ¯CommonConstantsNªIdentifierÍ)Í)­ACCOUNT_TABLEÂÂNªIdentifierÍ)Í)©tableNameÂÂNªIdentifierÍ)Í)$ªpredicatesT°MemberExpressionÍ)&Í)KT°MemberExpressionÍ)&Í)CNªIdentifierÍ)&Í)5¯CommonConstantsNªIdentifierÍ)6Í)C­ACCOUNT_TABLEÂÂNªIdentifierÍ)DÍ)K§columnsÂÂÂ¥constR³ExpressionStatementÍ)_Í)S´AssignmentExpressionÍ)_Í)€¡=NªIdentifierÍ)_Í)c¤listY®CallExpressionÍ)fÍ)€T°MemberExpressionÍ)fÍ)uU®ThisExpressionÍ)fÍ)jNªIdentifierÍ)kÍ)uªformatDataÂÂ‘NªIdentifierÍ)vÍ)©resultSetÂ_«IfStatementÍ)“Í)ä`°BinaryExpressionÍ)—Í)¦T°MemberExpressionÍ)—Í)¢NªIdentifierÍ)—Í)›¤listNªIdentifierÍ)œÍ)¢¦lengthÂÂ¡>V§LiteralÍ)¥Í)¦ ¡0O®BlockStatementÍ)¨Í)ä‘R³ExpressionStatementÍ)¿Í)ÑY®CallExpressionÍ)¿Í)ĞT°MemberExpressionÍ)¿Í)ÎNªIdentifierÍ)¿Í)È©resultSetNªIdentifierÍ)ÉÍ)Î¥closeÂÂÂÀR³ExpressionStatementÍ)öÍ*dY®CallExpressionÍ)öÍ*cT°MemberExpressionÍ)öÍ* NªIdentifierÍ)öÍ)û¥hilogNªIdentifierÍ)üÍ* ¤infoÂÂ”V§LiteralÍ*Í* ¦0x0000V§LiteralÍ*	Í*¥hilog§'hilog'T°MemberExpressionÍ*Í*)NªIdentifierÍ*Í*!¯CommonConstantsNªIdentifierÍ*"Í*)§RDB_TAGÂÂ`°BinaryExpressionÍ*+Í*bV§LiteralÍ*+Í*MÙ Remote query success, row cout: Ù"'Remote query success, row cout: '¡+T°MemberExpressionÍ*PÍ*bNªIdentifierÍ*PÍ*Y©resultSetNªIdentifierÍ*ZÍ*b¨rowCountÂÂÂR³ExpressionStatementÍ*vÍ+Y®CallExpressionÍ*vÍ+T°MemberExpressionÍ*vÍ*€NªIdentifierÍ*vÍ*{¥hilogNªIdentifierÍ*|Í*€¤infoÂÂ”V§LiteralÍ*Í*‡ ¦0x0000V§LiteralÍ*‰Í*¥hilog§'hilog'T°MemberExpressionÍ*’Í*©NªIdentifierÍ*’Í*¡¯CommonConstantsNªIdentifierÍ*¢Í*©§RDB_TAGÂÂ\¯TemplateLiteralÍ*«Í+’T°MemberExpressionÍ*ÆÍ*ÛNªIdentifierÍ*ÆÍ*Ï©resultSetNªIdentifierÍ*ĞÍ*Û«columnNamesÂÂT°MemberExpressionÍ*îÍ+NªIdentifierÍ*îÍ*÷©resultSetNªIdentifierÍ*øÍ+«columnCountÂÂ“]¯TemplateElementÍ*¬Í*Ä^¸ResultSet column names: ¸ResultSet column names: Â]¯TemplateElementÍ*ÜÍ*ì^°, column count: °, column count: Â]¯TemplateElementÍ+Í+^  ÃÂ[«CatchClauseÍ+$Í+ĞNªIdentifierÍ++Í+.£errO®BlockStatementÍ+0Í+Ğ‘R³ExpressionStatementÍ+CÍ+ÁY®CallExpressionÍ+CÍ+ÀT°MemberExpressionÍ+CÍ+NNªIdentifierÍ+CÍ+H¥hilogNªIdentifierÍ+IÍ+N¥errorÂÂ”V§LiteralÍ+OÍ+U ¦0x0000V§LiteralÍ+WÍ+^¥hilog§'hilog'T°MemberExpressionÍ+`Í+wNªIdentifierÍ+`Í+o¯CommonConstantsNªIdentifierÍ+pÍ+w§RDB_TAGÂÂ`°BinaryExpressionÍ+yÍ+¿`°BinaryExpressionÍ+yÍ+±`°BinaryExpressionÍ+yÍ+¡V§LiteralÍ+yÍ+–»Remote query failed, code: ½'Remote query failed, code: '¡+T°MemberExpressionÍ+™Í+¡NªIdentifierÍ+™Í+œ£errNªIdentifierÍ+Í+¡¤codeÂÂ¡+V§LiteralÍ+¤Í+±«, message: ­', message: '¡+T°MemberExpressionÍ+´Í+¿NªIdentifierÍ+´Í+·£errNªIdentifierÍ+¸Í+¿§messageÂÂÂÀÀX¯ReturnStatementÍ+åÍ+ñNªIdentifierÍ+ìÍ+ğ¤listP°MethodDefinitionÍ,Í0•ÂÂNªIdentifierÍ,Í,&ªformatData¦methodQ²FunctionExpressionÍ,&Í0•ÀÂÂÂ‘NªIdentifierÍ,'Í,0©resultSetO®BlockStatementÍ,2Í0•”b³VariableDeclarationÍ,=Í,K‘c²VariableDeclaratorÍ,AÍ,JNªIdentifierÍ,AÍ,E¤listZ¯ArrayExpressionÍ,HÍ,J£letb³VariableDeclarationÍ,UÍ,t‘c²VariableDeclaratorÍ,YÍ,sNªIdentifierÍ,YÍ,^¥countT°MemberExpressionÍ,aÍ,sNªIdentifierÍ,aÍ,j©resultSetNªIdentifierÍ,kÍ,s¨rowCountÂÂ£let_«IfStatementÍ,~Í0x`±LogicalExpressionÍ,‚Í,ª`°BinaryExpressionÍ,‚Í,NªIdentifierÍ,‚Í,‡¥count£!==V§LiteralÍ,ŒÍ, ¡0¢&&`°BinaryExpressionÍ,‘Í,ªd¯UnaryExpressionÍ,‘Í,¦typeofÃNªIdentifierÍ,˜Í,¥count£!==V§LiteralÍ,¢Í,ª¦string¨'string'O®BlockStatementÍ,¬Í0x‘W¬TryStatementÍ,»Í0mO®BlockStatementÍ,¿Í/Ñ’R³ExpressionStatementÍ,ÒÍ,ëY®CallExpressionÍ,ÒÍ,êT°MemberExpressionÍ,ÒÍ,èNªIdentifierÍ,ÒÍ,Û©resultSetNªIdentifierÍ,ÜÍ,è¬goToFirstRowÂÂÂa¬ForStatementÍ,ıÍ/Âb³VariableDeclarationÍ-Í-‘c²VariableDeclaratorÍ-Í-NªIdentifierÍ-Í-¡iV§LiteralÍ-
+Í- ¡0£let`°BinaryExpressionÍ-Í-NªIdentifierÍ-Í-¡i¡<NªIdentifierÍ-Í-¥countd°UpdateExpressionÍ-Í-¢++ÂNªIdentifierÍ-Í-¡iO®BlockStatementÍ-Í/Â—b³VariableDeclarationÍ-4Í-ë‘c²VariableDeclaratorÍ-8Í-êNªIdentifierÍ-8Í-;£tmpÔrg”¤type¥start£endªproperties°ObjectExpressionÍ->Í-ê”Ôrh™¤type¥start£end¦method©shorthand¨computed£key¥value¤kind¨PropertyÍ-YÍ-_ÂÂÂNªIdentifierÍ-YÍ-[¢idV§LiteralÍ-]Í-_ ¢''¤inith¨PropertyÍ-zÍ-ˆÂÂÂNªIdentifierÍ-zÍ-…«accountTypeV§LiteralÍ-‡Í-ˆ ¡0¤inith¨PropertyÍ-£Í-¯ÂÂÂNªIdentifierÍ-£Í-«¨typeTextV§LiteralÍ-­Í-¯ ¢''¤inith¨PropertyÍ-ÊÍ-ÓÂÂÂNªIdentifierÍ-ÊÍ-Ğ¦amountV§LiteralÍ-ÒÍ-Ó ¡0¤init£letR³ExpressionStatementÍ.Í.>S´AssignmentExpressionÍ.Í.=¡=T°MemberExpressionÍ.Í.NªIdentifierÍ.Í.£tmpNªIdentifierÍ.Í.¢idÂÂY®CallExpressionÍ.
+Í.=T°MemberExpressionÍ.
+Í.NªIdentifierÍ.
+Í.©resultSetNªIdentifierÍ.Í.©getStringÂÂ‘Y®CallExpressionÍ.Í.<T°MemberExpressionÍ.Í.6NªIdentifierÍ.Í.'©resultSetNªIdentifierÍ.(Í.6®getColumnIndexÂÂ‘V§LiteralÍ.7Í.;¢id¤'id'ÂÂR³ExpressionStatementÍ.TÍ.£S´AssignmentExpressionÍ.TÍ.¢¡=T°MemberExpressionÍ.TÍ.cNªIdentifierÍ.TÍ.W£tmpNªIdentifierÍ.XÍ.c«accountTypeÂÂY®CallExpressionÍ.fÍ.¢T°MemberExpressionÍ.fÍ.yNªIdentifierÍ.fÍ.o©resultSetNªIdentifierÍ.pÍ.y©getDoubleÂÂ‘Y®CallExpressionÍ.zÍ.¡T°MemberExpressionÍ.zÍ.’NªIdentifierÍ.zÍ.ƒ©resultSetNªIdentifierÍ.„Í.’®getColumnIndexÂÂ‘V§LiteralÍ.“Í. «accountType­'accountType'ÂÂR³ExpressionStatementÍ.¹Í/S´AssignmentExpressionÍ.¹Í/¡=T°MemberExpressionÍ.¹Í.ÅNªIdentifierÍ.¹Í.¼£tmpNªIdentifierÍ.½Í.Å¨typeTextÂÂY®CallExpressionÍ.ÈÍ/T°MemberExpressionÍ.ÈÍ.ÛNªIdentifierÍ.ÈÍ.Ñ©resultSetNªIdentifierÍ.ÒÍ.Û©getStringÂÂ‘Y®CallExpressionÍ.ÜÍ/ T°MemberExpressionÍ.ÜÍ.ôNªIdentifierÍ.ÜÍ.å©resultSetNªIdentifierÍ.æÍ.ô®getColumnIndexÂÂ‘V§LiteralÍ.õÍ.ÿ¨typeTextª'typeText'ÂÂR³ExpressionStatementÍ/Í/]S´AssignmentExpressionÍ/Í/\¡=T°MemberExpressionÍ/Í/"NªIdentifierÍ/Í/£tmpNªIdentifierÍ/Í/"¦amountÂÂY®CallExpressionÍ/%Í/\T°MemberExpressionÍ/%Í/8NªIdentifierÍ/%Í/.©resultSetNªIdentifierÍ//Í/8©getDoubleÂÂ‘Y®CallExpressionÍ/9Í/[T°MemberExpressionÍ/9Í/QNªIdentifierÍ/9Í/B©resultSetNªIdentifierÍ/CÍ/Q®getColumnIndexÂÂ‘V§LiteralÍ/RÍ/Z¦amount¨'amount'ÂÂR³ExpressionStatementÍ/sÍ/S´AssignmentExpressionÍ/sÍ/€¡=T°MemberExpressionÍ/sÍ/zNªIdentifierÍ/sÍ/w¤listNªIdentifierÍ/xÍ/y¡iÃÂNªIdentifierÍ/}Í/€£tmpR³ExpressionStatementÍ/—Í/¯Y®CallExpressionÍ/—Í/®T°MemberExpressionÍ/—Í/¬NªIdentifierÍ/—Í/ ©resultSetNªIdentifierÍ/¡Í/¬«goToNextRowÂÂÂ[«CatchClauseÍ/ßÍ0mNªIdentifierÍ/æÍ/ë¥errorO®BlockStatementÍ/íÍ0m‘R³ExpressionStatementÍ0 Í0^Y®CallExpressionÍ0 Í0]T°MemberExpressionÍ0 Í0NªIdentifierÍ0 Í0¥hilogNªIdentifierÍ0Í0¥errorÂÂ“V§LiteralÍ0Í0 ¦0x0000V§LiteralÍ0Í0 ªRdbManager¬'RdbManager'\¯TemplateLiteralÍ0"Í0\’T°MemberExpressionÍ06Í0@NªIdentifierÍ06Í0;¥errorNªIdentifierÍ0<Í0@¤codeÂÂT°MemberExpressionÍ0MÍ0ZNªIdentifierÍ0MÍ0R¥errorNªIdentifierÍ0SÍ0Z§messageÂÂ“]¯TemplateElementÍ0#Í04^±have error .Code:±have error .Code:Â]¯TemplateElementÍ0AÍ0K^ª,message: ª,message: Â]¯TemplateElementÍ0[Í0[^  ÃÂÀÀX¯ReturnStatementÍ0‚Í0NªIdentifierÍ0‰Í0¤listP°MethodDefinitionÍ1Í1ëÂÂNªIdentifierÍ1Í1®generateBucket¦methodQ²FunctionExpressionÍ1Í1ëÀÂÂÂ‘NªIdentifierÍ1Í1§accountO®BlockStatementÍ1Í1ë–b³VariableDeclarationÍ1$Í11‘c²VariableDeclaratorÍ1(Í10NªIdentifierÍ1(Í1+£objg°ObjectExpressionÍ1.Í10£letR³ExpressionStatementÍ1;Í1OS´AssignmentExpressionÍ1;Í1N¡=T°MemberExpressionÍ1;Í1ANªIdentifierÍ1;Í1>£objNªIdentifierÍ1?Í1A¢idÂÂT°MemberExpressionÍ1DÍ1NNªIdentifierÍ1DÍ1K§accountNªIdentifierÍ1LÍ1N¢idÂÂR³ExpressionStatementÍ1YÍ1S´AssignmentExpressionÍ1YÍ1~¡=T°MemberExpressionÍ1YÍ1hNªIdentifierÍ1YÍ1\£objNªIdentifierÍ1]Í1h«accountTypeÂÂT°MemberExpressionÍ1kÍ1~NªIdentifierÍ1kÍ1r§accountNªIdentifierÍ1sÍ1~«accountTypeÂÂR³ExpressionStatementÍ1‰Í1©S´AssignmentExpressionÍ1‰Í1¨¡=T°MemberExpressionÍ1‰Í1•NªIdentifierÍ1‰Í1Œ£objNªIdentifierÍ1Í1•¨typeTextÂÂT°MemberExpressionÍ1˜Í1¨NªIdentifierÍ1˜Í1Ÿ§accountNªIdentifierÍ1 Í1¨¨typeTextÂÂR³ExpressionStatementÍ1³Í1ÏS´AssignmentExpressionÍ1³Í1Î¡=T°MemberExpressionÍ1³Í1½NªIdentifierÍ1³Í1¶£objNªIdentifierÍ1·Í1½¦amountÂÂT°MemberExpressionÍ1ÀÍ1ÎNªIdentifierÍ1ÀÍ1Ç§accountNªIdentifierÍ1ÈÍ1Î¦amountÂÂX¯ReturnStatementÍ1ÙÍ1äNªIdentifierÍ1àÍ1ã£objP°MethodDefinitionÍ2OÍ5®ÂÂNªIdentifierÍ2OÍ2b³updateLocalDataBase¦methodQ²FunctionExpressionÍ2bÍ5®ÀÂÂÂ’NªIdentifierÍ2cÍ2j§oldListNªIdentifierÍ2lÍ2s§newListO®BlockStatementÍ2uÍ5®“b³VariableDeclarationÍ2€Í2¥‘c²VariableDeclaratorÍ2†Í2¤NªIdentifierÍ2†Í2Š¤listY®CallExpressionÍ2Í2¤T°MemberExpressionÍ2Í2›NªIdentifierÍ2Í2”§newListNªIdentifierÍ2•Í2›¦concatÂÂ‘NªIdentifierÍ2œÍ2£§oldListÂ¥constb³VariableDeclarationÍ2¯Í2ã‘c²VariableDeclaratorÍ2µÍ2âNªIdentifierÍ2µÍ2»¦idListf­NewExpressionÍ2¾Í2âNªIdentifierÍ2ÂÍ2Å£Set‘Y®CallExpressionÍ2ÆÍ2áT°MemberExpressionÍ2ÆÍ2ÎNªIdentifierÍ2ÆÍ2Ê¤listNªIdentifierÍ2ËÍ2Î£mapÂÂ‘Q·ArrowFunctionExpressionÍ2ÏÍ2àÀÃÂÂ‘NªIdentifierÍ2ĞÍ2Ô¤itemT°MemberExpressionÍ2ÙÍ2àNªIdentifierÍ2ÙÍ2İ¤itemNªIdentifierÍ2ŞÍ2à¢idÂÂÂ¥constR³ExpressionStatementÍ2íÍ5§Y®CallExpressionÍ2íÍ5¦T°MemberExpressionÍ2íÍ2ûNªIdentifierÍ2íÍ2ó¦idListNªIdentifierÍ2ôÍ2û§forEachÂÂ‘Q·ArrowFunctionExpressionÍ2üÍ5¥ÀÂÂÂ‘NªIdentifierÍ2ıÍ2ÿ¢idO®BlockStatementÍ3Í5¥“b³VariableDeclarationÍ3Í3R‘c²VariableDeclaratorÍ3Í3QNªIdentifierÍ3Í3(¯isFindInOldListY®CallExpressionÍ3+Í3QT°MemberExpressionÍ3+Í37NªIdentifierÍ3+Í32§oldListNªIdentifierÍ33Í37¤findÂÂ‘Q·ArrowFunctionExpressionÍ38Í3PÀÃÂÂ‘NªIdentifierÍ39Í3=¤item`°BinaryExpressionÍ3BÍ3PNªIdentifierÍ3BÍ3D¢id£===T°MemberExpressionÍ3IÍ3PNªIdentifierÍ3IÍ3M¤itemNªIdentifierÍ3NÍ3P¢idÂÂÂ¥constb³VariableDeclarationÍ3`Í3Ÿ‘c²VariableDeclaratorÍ3fÍ3NªIdentifierÍ3fÍ3u¯isFindInNewListY®CallExpressionÍ3xÍ3T°MemberExpressionÍ3xÍ3„NªIdentifierÍ3xÍ3§newListNªIdentifierÍ3€Í3„¤findÂÂ‘Q·ArrowFunctionExpressionÍ3…Í3ÀÃÂÂ‘NªIdentifierÍ3†Í3Š¤item`°BinaryExpressionÍ3Í3NªIdentifierÍ3Í3‘¢id£===T°MemberExpressionÍ3–Í3NªIdentifierÍ3–Í3š¤itemNªIdentifierÍ3›Í3¢idÂÂÂ¥const_«IfStatementÍ3­Í5šd¯UnaryExpressionÍ3±Í3Á¡!ÃNªIdentifierÍ3²Í3Á¯isFindInOldListO®BlockStatementÍ3ÃÍ4K’b³VariableDeclarationÍ3ÖÍ4‘c²VariableDeclaratorÍ3ÜÍ4NªIdentifierÍ3ÜÍ3à¤item`±LogicalExpressionÍ3ãÍ4Y®CallExpressionÍ3ãÍ4T°MemberExpressionÍ3ãÍ3ìNªIdentifierÍ3ãÍ3ç¤listNªIdentifierÍ3èÍ3ì¤findÂÂ‘Q·ArrowFunctionExpressionÍ3íÍ4ÀÃÂÂ‘NªIdentifierÍ3îÍ3ò¤item`°BinaryExpressionÍ3÷Í4NªIdentifierÍ3÷Í3ù¢id£===T°MemberExpressionÍ3şÍ4NªIdentifierÍ3şÍ4¤itemNªIdentifierÍ4Í4¢idÂÂÂ¢||g°ObjectExpressionÍ4
+Í4¥constR³ExpressionStatementÍ4Í4<Y®CallExpressionÍ4Í4;T°MemberExpressionÍ4Í4.U®ThisExpressionÍ4Í4#NªIdentifierÍ4$Í4.ªinsertDataÂÂ’NªIdentifierÍ4/Í43¤itemV§LiteralÍ45Í4:Â¥falseÂ_«IfStatementÍ4^Í5šd¯UnaryExpressionÍ4bÍ4r¡!ÃNªIdentifierÍ4cÍ4r¯isFindInNewListO®BlockStatementÍ4tÍ4ü’b³VariableDeclarationÍ4‡Í4¾‘c²VariableDeclaratorÍ4Í4½NªIdentifierÍ4Í4‘¤item`±LogicalExpressionÍ4”Í4½Y®CallExpressionÍ4”Í4·T°MemberExpressionÍ4”Í4NªIdentifierÍ4”Í4˜¤listNªIdentifierÍ4™Í4¤findÂÂ‘Q·ArrowFunctionExpressionÍ4Í4¶ÀÃÂÂ‘NªIdentifierÍ4ŸÍ4£¤item`°BinaryExpressionÍ4¨Í4¶NªIdentifierÍ4¨Í4ª¢id£===T°MemberExpressionÍ4¯Í4¶NªIdentifierÍ4¯Í4³¤itemNªIdentifierÍ4´Í4¶¢idÂÂÂ¢||g°ObjectExpressionÍ4»Í4½¥constR³ExpressionStatementÍ4ĞÍ4íY®CallExpressionÍ4ĞÍ4ìT°MemberExpressionÍ4ĞÍ4ßU®ThisExpressionÍ4ĞÍ4ÔNªIdentifierÍ4ÕÍ4ßªdeleteDataÂÂ’NªIdentifierÍ4àÍ4ä¤itemV§LiteralÍ4æÍ4ëÂ¥falseÂO®BlockStatementÍ5Í5š’b³VariableDeclarationÍ5"Í5\‘c²VariableDeclaratorÍ5(Í5[NªIdentifierÍ5(Í5,¤item`±LogicalExpressionÍ5/Í5[Y®CallExpressionÍ5/Í5UT°MemberExpressionÍ5/Í5;NªIdentifierÍ5/Í56§newListNªIdentifierÍ57Í5;¤findÂÂ‘Q·ArrowFunctionExpressionÍ5<Í5TÀÃÂÂ‘NªIdentifierÍ5=Í5A¤item`°BinaryExpressionÍ5FÍ5TNªIdentifierÍ5FÍ5H¢id£===T°MemberExpressionÍ5MÍ5TNªIdentifierÍ5MÍ5Q¤itemNªIdentifierÍ5RÍ5T¢idÂÂÂ¢||g°ObjectExpressionÍ5YÍ5[¥constR³ExpressionStatementÍ5nÍ5‹Y®CallExpressionÍ5nÍ5ŠT°MemberExpressionÍ5nÍ5}U®ThisExpressionÍ5nÍ5rNªIdentifierÍ5sÍ5}ªupdateDataÂÂ’NªIdentifierÍ5~Í5‚¤itemV§LiteralÍ5„Í5‰Â¥falseÂÂÀ”Ôri•¤type¥start£endªspecifiers¦source±ImportDeclaration 9‘Ôrj”¤type¥start£end¥local¶ImportDefaultSpecifierNªIdentifier¯relationalStoreV§Literal8º@ohos.data.relationalStore¼"@ohos.data.relationalStore"i±ImportDeclaration;Ì‘j¶ImportDefaultSpecifierÌBÌZNªIdentifierÌBÌZ¸distributedDeviceManagerV§LiteralÌ`Ì€¾@ohos.distributedDeviceManagerÙ "@ohos.distributedDeviceManager"i±ImportDeclarationÌƒÌ£‘j¶ImportDefaultSpecifierÌŠÌNªIdentifierÌŠÌ¥hilogV§LiteralÌ•Ì¢«@ohos.hilog­"@ohos.hilog"i±ImportDeclarationÌ¥Ìİ‘j¶ImportDefaultSpecifierÌ¬Ì»NªIdentifierÌ¬Ì»¯CommonConstantsV§LiteralÌÁÌÜ¹../common/CommonConstants»'../common/CommonConstants'

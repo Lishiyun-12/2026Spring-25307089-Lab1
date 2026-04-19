@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "entry_MainAbility",
+      "value": "entry_MainAbility"
+    },
+    {
+      "name": "description_mainability",
+      "value": "Empty Ability"
+    },
+    {
+      "name": "mpchart_no_data_available",
+      "value": "No chart data available"
+    }
+  ]
+}

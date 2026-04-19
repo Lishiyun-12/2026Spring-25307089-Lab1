@@ -1,0 +1,42 @@
+{
+  "lockVersion": "1.0",
+  "settings": {
+    "resolveConflict": true,
+    "resolveConflictStrict": false,
+    "installAll": true
+  },
+  "overrides": {},
+  "overrideDependencyMap": {},
+  "modules": {
+    ".": {
+      "name": "",
+      "dependencies": {
+        "@ohos/mpchart": {
+          "specifier": "^3.0.27",
+          "version": "3.0.27"
+        }
+      },
+      "devDependencies": {},
+      "dynamicDependencies": {},
+      "maskedByOverrideDependencyMap": false
+    },
+    "entry": {
+      "name": "entry",
+      "dependencies": {},
+      "devDependencies": {},
+      "dynamicDependencies": {},
+      "maskedByOverrideDependencyMap": false
+    }
+  },
+  "packages": {
+    "@ohos/mpchart@3.0.27": {
+      "integrity": "sha512-kCLyC8FVM+hdaj2LNCU0iNnBpGYw44Yy2Y3wfSJ6yzoeOS4Yx0Tmo/MHO9CGkBZjvQxwWgOrKT8ZXW0ZCK0UIw==",
+      "storePath": "oh_modules/.ohpm/@ohos+mpchart@3.0.27",
+      "dependencies": {},
+      "dynamicDependencies": {},
+      "dev": false,
+      "dynamic": false,
+      "maskedByOverrideDependencyMap": false
+    }
+  }
+}
